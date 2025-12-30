@@ -11,17 +11,8 @@ from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
 
 
-@tool
-def verify_evidence_substring(evidence: str, nl_description: str) -> Dict[str, Any]:
-    """Verify that evidence is an exact substring of the provided natural language description.
-
-    Args:
-        evidence: Evidence snippet to verify (case-sensitive)
-        nl_description: Full natural-language description
-
-    Returns:
-        {"is_substring": bool, "error": str | None}
-    """
+def _verify_evidence_substring_impl(evidence: str, nl_description: str) -> Dict[str, Any]:
+    """Pure implementation of verify_evidence_substring (safe to call from Python steps)."""
     ev = evidence or ""
     desc = nl_description or ""
 
@@ -40,6 +31,20 @@ def verify_evidence_substring(evidence: str, nl_description: str) -> Dict[str, A
 
 
 @tool
+def verify_evidence_substring(evidence: str, nl_description: str) -> Dict[str, Any]:
+    """Verify that evidence is an exact substring of the provided natural language description.
+
+    Args:
+        evidence: Evidence snippet to verify (case-sensitive)
+        nl_description: Full natural-language description
+
+    Returns:
+        {"is_substring": bool, "error": str | None}
+    """
+    return _verify_evidence_substring_impl(evidence=evidence, nl_description=nl_description)
+
+
+@tool
 def verify_entity_in_known_entities(entity: str, known_entities: List[str]) -> Dict[str, Any]:
     """Verify that an entity name exists in a provided list of known entity names.
 
@@ -52,6 +57,11 @@ def verify_entity_in_known_entities(entity: str, known_entities: List[str]) -> D
     Returns:
         {"exists": bool, "error": str | None}
     """
+    return _verify_entity_in_known_entities_impl(entity=entity, known_entities=known_entities)
+
+
+def _verify_entity_in_known_entities_impl(entity: str, known_entities: List[str]) -> Dict[str, Any]:
+    """Pure implementation of verify_entity_in_known_entities (safe to call from Python steps)."""
     ent = (entity or "").strip()
     if not ent:
         return {"exists": False, "error": "entity is empty/blank"}
@@ -87,6 +97,11 @@ def validate_subset(subset: List[str], superset: List[str]) -> Dict[str, Any]:
     Returns:
         {"is_subset": bool, "invalid_items": List[str], "error": str | None}
     """
+    return _validate_subset_impl(subset=subset, superset=superset)
+
+
+def _validate_subset_impl(subset: List[str], superset: List[str]) -> Dict[str, Any]:
+    """Pure implementation of validate_subset (safe to call from Python steps)."""
     sub = [str(x) for x in (subset or [])]
     sup = [str(x) for x in (superset or [])]
 
@@ -110,6 +125,11 @@ def validate_merge_decision(should_merge: bool, merged_entity_name: Optional[str
     - If should_merge is True, merged_entity_name must be a non-empty string.
     - If should_merge is False, merged_entity_name must be null/None.
     """
+    return _validate_merge_decision_impl(should_merge=should_merge, merged_entity_name=merged_entity_name)
+
+
+def _validate_merge_decision_impl(should_merge: bool, merged_entity_name: Optional[str]) -> Dict[str, Any]:
+    """Pure implementation of validate_merge_decision (safe to call from Python steps)."""
     if should_merge:
         if merged_entity_name is None or not str(merged_entity_name).strip():
             return {
@@ -134,6 +154,11 @@ def validate_final_entities(entities: List[str]) -> Dict[str, Any]:
     Returns:
         {"all_valid": bool, "invalid_entities": List[str], "errors": List[str]}
     """
+    return _validate_final_entities_impl(entities=entities)
+
+
+def _validate_final_entities_impl(entities: List[str]) -> Dict[str, Any]:
+    """Pure implementation of validate_final_entities (safe to call from Python steps)."""
     import re
 
     invalid: List[str] = []

@@ -5,6 +5,8 @@ Uses a separate log file: NL2DATA/logs/nl2data_test_iot.log
 
 import asyncio
 import sys
+import argparse
+import os
 from pathlib import Path
 
 # Add project root to path (go up 3 levels from NL2DATA/tests/)
@@ -20,19 +22,29 @@ from NL2DATA.tests.utils.pipeline_logger import get_pipeline_logger
 IOT_DESCRIPTION = """Create an IoT telemetry dataset for 10,000 industrial sensors deployed across 100 plants. There should be one high-frequency fact table called sensor_reading with at least 200 million rows over a 30-day period, plus dimension tables for sensors, plants, and sensor types. Sensor readings (temperature, vibration, current) should mostly remain within normal operating bands that differ by sensor type, with rare anomalies (0.1–0.5% of readings) modeled as spikes, drifts, or sudden step changes. Inject 3–5 "cascading failure" incidents in which a single plant experiences coordinated anomalies across many sensors in a narrow time window, and each incident is preceded by subtle early-warning deviations. Timestamps should be approximately uniform over time but with random missing intervals per sensor to simulate connectivity issues. Include synthetic maintenance events that reset some sensors' behavior. The data should stress time-series joins, anomaly detection queries, and "before/after incident" window aggregations."""
 
 
-async def test_iot_with_separate_log():
-    """Test IoT description with separate log file."""
-    logger = get_logger(__name__)
+async def test_iot_with_separate_log(max_phase: int = None):
+    """Test IoT description with separate log file.
     
-    # Use separate test log file
-    test_log_file = "NL2DATA/logs/nl2data_test_iot.log"
+    Args:
+        max_phase: Maximum phase to run (1-7). If None, runs all phases.
+    """
+    logger = get_logger(__name__)
+
+    # Enable full, untruncated step output dumps in logs for this test script.
+    # This is intentionally scoped to this test to avoid noisy logs in normal runs.
+    os.environ.setdefault("NL2DATA_DEBUG_DUMP", "1")
+    
+    # Use separate test log file (relative to NL2DATA root).
+    # NOTE: NL2DATA/tests/integration_test.py also calls setup_logging() internally, so we pass
+    # this path down to prevent it from overwriting our test log file configuration.
+    test_log_file = "logs/nl2data_test_iot.log"
     
     # Setup logging with test log file
     log_config = get_config('logging')
     setup_logging(
         level=log_config['level'],
         format_type=log_config['format'],
-        log_to_file=log_config['log_to_file'],
+        log_to_file=True,  # Force file logging for this test run
         log_file=test_log_file,
         clear_existing=True,  # Clear the test log file
     )
@@ -63,7 +75,9 @@ async def test_iot_with_separate_log():
         # Run integration test with IoT description
         success = await test_phases_1_2_3_4_5_6_7_integration(
             nl_description=IOT_DESCRIPTION,
-            description_index=1
+            description_index=1,
+            max_phase=max_phase,
+            log_file_override=test_log_file,
         )
         
         if success:
@@ -93,6 +107,27 @@ async def test_iot_with_separate_log():
 
 
 if __name__ == "__main__":
-    success = asyncio.run(test_iot_with_separate_log())
+    parser = argparse.ArgumentParser(
+        description="Test IoT description with NL2DATA pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python test_iot_fixes.py                    # Run all phases (1-7)
+  python test_iot_fixes.py --max-phase 3      # Run phases 1, 2, and 3 only
+  python test_iot_fixes.py -m 1               # Run only phase 1
+        """
+    )
+    parser.add_argument(
+        "--max-phase", "-m",
+        type=int,
+        default=None,
+        choices=range(1, 8),
+        metavar="PHASE",
+        help="Maximum phase to run (1-7). If not specified, runs all phases."
+    )
+    
+    args = parser.parse_args()
+    
+    success = asyncio.run(test_iot_with_separate_log(max_phase=args.max_phase))
     sys.exit(0 if success else 1)
 

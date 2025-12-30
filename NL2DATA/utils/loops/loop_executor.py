@@ -94,13 +94,13 @@ class SafeLoopExecutor:
                                 f"Loop terminated by oscillation detection after {iteration + 1} iterations "
                                 f"({total_time:.2f}s total)"
                             )
-                        return {
-                            "result": result,
-                            "iterations": iteration + 1,
-                            "terminated_by": "oscillation",
-                            "history": history,
-                            "condition_met": False  # Indicate condition was not met
-                        }
+                            return {
+                                "result": result,
+                                "iterations": iteration + 1,
+                                "terminated_by": "oscillation",
+                                "history": history,
+                                "condition_met": False  # Indicate condition was not met
+                            }
                         state_hashes.append(state_hash)
                 
                 # Max iterations reached

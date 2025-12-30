@@ -1,9 +1,49 @@
 """Naming validation tools for entity/attribute names and conventions."""
 
 import re
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from langchain_core.tools import tool
 from langchain_core.tools.base import ToolException
+
+
+def _check_entity_name_validity_impl(name: str) -> Dict[str, Any]:
+    """Pure implementation of check_entity_name_validity (safe to call from Python steps).
+
+    Returns a dict and never raises.
+    """
+    if not name or not str(name).strip():
+        return {"valid": False, "error": "Entity name is empty", "suggestion": None}
+
+    name = str(name).strip()
+
+    # Check for SQL reserved keywords
+    sql_keywords = [
+        "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+        "ALTER", "TABLE", "INDEX", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
+        "CONSTRAINT", "UNIQUE", "NOT", "NULL", "DEFAULT", "CHECK", "AND", "OR",
+    ]
+
+    if name.upper() in sql_keywords:
+        suggestion = f"Use '{name}_entity' or '{name}_table' instead"
+        return {
+            "valid": False,
+            "error": f"Entity name '{name}' is a SQL reserved keyword.",
+            "suggestion": suggestion,
+        }
+
+    # Check for valid SQL identifier (alphanumeric + underscore, starts with letter)
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
+        suggestion = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+        return {
+            "valid": False,
+            "error": (
+                f"Entity name '{name}' contains invalid characters. "
+                "Must start with letter and contain only alphanumeric and underscore."
+            ),
+            "suggestion": suggestion,
+        }
+
+    return {"valid": True, "error": None, "suggestion": None}
 
 
 @tool
@@ -16,28 +56,14 @@ def check_entity_name_validity(name: str) -> Dict[str, Any]:
     Returns:
         Dictionary with 'valid' (bool), 'error' (str), and 'suggestion' (str)
     """
-    if not name or not name.strip():
-        raise ToolException("Entity name is empty")
-    
-    name = name.strip()
-    
-    # Check for SQL reserved keywords
-    sql_keywords = [
-        "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
-        "ALTER", "TABLE", "INDEX", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
-        "CONSTRAINT", "UNIQUE", "NOT", "NULL", "DEFAULT", "CHECK", "AND", "OR",
-    ]
-    
-    if name.upper() in sql_keywords:
-        suggestion = f"Use '{name}_entity' or '{name}_table' instead"
-        raise ToolException(f"Entity name '{name}' is a SQL reserved keyword. Suggestion: {suggestion}")
-    
-    # Check for valid SQL identifier (alphanumeric + underscore, starts with letter)
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
-        suggestion = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-        raise ToolException(f"Entity name '{name}' contains invalid characters. Must start with letter and contain only alphanumeric and underscore. Suggestion: {suggestion}")
-    
-    return {"valid": True, "error": None, "suggestion": None}
+    result = _check_entity_name_validity_impl(name)
+    if not result.get("valid", False):
+        suggestion = result.get("suggestion")
+        msg = result.get("error") or "Invalid entity name"
+        if suggestion:
+            msg = f"{msg} Suggestion: {suggestion}"
+        raise ToolException(msg)
+    return result
 
 
 @tool

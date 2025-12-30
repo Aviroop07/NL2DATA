@@ -11,7 +11,7 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
-from NL2DATA.utils.tools import check_entity_name_validity, verify_entity_in_known_entities
+from NL2DATA.utils.tools.validation_tools import _check_entity_name_validity_impl, _verify_entity_in_known_entities_impl
 
 logger = get_logger(__name__)
 
@@ -159,10 +159,58 @@ KeyEntitiesAlreadyIdentified: {key_entities}
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description, "key_entities": ", ".join(key_names)},
-            tools=[check_entity_name_validity, verify_entity_in_known_entities],
-            use_agent_executor=True,
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
+
+        # Deterministic post-validation:
+        # - name must be SQL-safe (via pure impl)
+        # - must NOT already exist in key_names
+        # - trigger must be a verbatim substring (best-effort enforcement)
+        cleaned: List[AuxiliaryEntitySuggestion] = []
+        seen_names: set[str] = set()
+        key_set_lower = {k.lower() for k in key_names}
+        for ent in result.suggested_entities or []:
+            name = (ent.name or "").strip()
+            if not name:
+                continue
+
+            # Reject duplicates of existing key entities
+            if name.lower() in key_set_lower:
+                continue
+
+            # Validate SQL-safe identifier shape / reserved words
+            valid_check = _check_entity_name_validity_impl(name)
+            if not valid_check.get("valid", False):
+                suggestion = (valid_check.get("suggestion") or "").strip()
+                if suggestion:
+                    name = suggestion
+                else:
+                    continue
+
+                # Re-check after applying suggestion
+                if not _check_entity_name_validity_impl(name).get("valid", False):
+                    continue
+
+            # Dedupe suggestions by name
+            if name.lower() in seen_names:
+                continue
+            seen_names.add(name.lower())
+
+            # Ensure NOT in key entities (again, after potential renaming)
+            if _verify_entity_in_known_entities_impl(name, key_names).get("exists", False):
+                continue
+
+            trig = (ent.trigger or "").strip()
+            if trig and trig not in (nl_description or ""):
+                # If trigger isn't grounded, blank it rather than failing the entity.
+                ent = ent.model_copy(update={"trigger": ""})
+
+            ent = ent.model_copy(update={"name": name})
+            cleaned.append(ent)
+
+        result = result.model_copy(update={"suggested_entities": cleaned})
         
         # Work with Pydantic model directly
         entity_count = len(result.suggested_entities)

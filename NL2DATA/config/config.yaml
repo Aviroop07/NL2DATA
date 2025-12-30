@@ -28,34 +28,31 @@ openai:
     # Error correction - longer responses for detailed corrections
     error_correction: 10000  # DDL error correction, SQL query correction
   
-  # Model Selection Policy - different models for different task types
+  # Model Selection Policy - using gpt-4o-mini for all task types
   model_selection:
     # Simple tasks - cost-effective model
     simple: "gpt-4o-mini"  # Domain detection, entity mention detection, simple validations
     
-    # Important tasks - high quality GPT-5 model
-    important: "gpt-5"  # Entity extraction, relation extraction, constraint analysis, domain inference
+    # Important tasks - using gpt-4o-mini for all tasks
+    important: "gpt-4o-mini"  # Entity extraction, relation extraction, constraint analysis, domain inference
     
-    # Reasoning tasks - GPT-5.1 for complex reasoning
-    # Note: Falls back to o3-mini if GPT-5 models unavailable
-    reasoning: "gpt-5.1"  # Complex reasoning, entity consolidation, relation validation
+    # Reasoning tasks - using gpt-4o-mini for all tasks
+    reasoning: "gpt-4o-mini"  # Complex reasoning, entity consolidation, relation validation
     
-    # Critical reasoning - most advanced model for highest-stakes decisions
-    # Use gpt-4o for steps where correctness is absolutely critical (foundation steps)
-    # Note: gpt-5.2-pro doesn't exist - using gpt-4o as a reliable high-quality alternative
-    critical_reasoning: "gpt-4o"  # Entity extraction, relation extraction, cardinality, functional dependencies
+    # Critical reasoning - using gpt-4o-mini for all tasks
+    critical_reasoning: "gpt-4o-mini"  # Entity extraction, relation extraction, cardinality, functional dependencies
     
-    # Advanced reasoning - gpt-5.2 or o3-pro for important but less foundational steps
-    advanced_reasoning: "gpt-5.2"  # Schema validation, information need identification, completeness checks
+    # Advanced reasoning - using gpt-4o-mini for all tasks
+    advanced_reasoning: "gpt-4o-mini"  # Schema validation, information need identification, completeness checks
     
-    # High-fan-out tasks - balance cost and accuracy
+    # High-fan-out tasks - using gpt-4o-mini for all tasks
     high_fanout: "gpt-4o-mini"  # Attribute discovery (many entities), per-entity/per-relation tasks
     
-    # Validation tasks - fast and accurate
+    # Validation tasks - using gpt-4o-mini for all tasks
     validation: "gpt-4o-mini"  # Syntax validation, naming validation
     
-    # Error correction - high quality needed
-    error_correction: "gpt-4o"  # DDL error correction, SQL query correction
+    # Error correction - using gpt-4o-mini for all tasks
+    error_correction: "gpt-4o-mini"  # DDL error correction, SQL query correction
 
 # LangChain Configuration
 langchain:

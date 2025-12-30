@@ -4,7 +4,7 @@ Checks for duplicate entities, synonyms, or entities that should be merged.
 Prevents schema bloat and confusion.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
@@ -15,14 +15,75 @@ from NL2DATA.phases.phase1.utils import (
     extract_entity_name,
     extract_entity_description,
 )
-from NL2DATA.utils.tools import (
-    check_entity_name_similarity,
-    check_entity_name_validity,
-    validate_merge_decision,
-    validate_final_entities,
-)
 
 logger = get_logger(__name__)
+
+_COMMON_SYNONYM_PAIRS: List[Tuple[str, str]] = [
+    ("user", "customer"),
+    ("client", "customer"),
+    ("person", "user"),
+    ("item", "product"),
+    ("order", "transaction"),
+    ("purchase", "order"),
+]
+
+
+def _name_similarity(entity1: str, entity2: str) -> Dict[str, Any]:
+    """
+    Lightweight, deterministic approximation of the former tool `check_entity_name_similarity`.
+    Returns: {"similarity": float, "are_synonyms": bool}
+    """
+    from difflib import SequenceMatcher
+
+    n1 = (entity1 or "").strip().lower()
+    n2 = (entity2 or "").strip().lower()
+
+    if not n1 or not n2:
+        return {"similarity": 0.0, "are_synonyms": False}
+
+    if n1 == n2:
+        return {"similarity": 1.0, "are_synonyms": True}
+
+    # Explicit synonym pairs (order-insensitive)
+    for a, b in _COMMON_SYNONYM_PAIRS:
+        if (n1 == a and n2 == b) or (n1 == b and n2 == a):
+            return {"similarity": 0.95, "are_synonyms": True}
+
+    sim = SequenceMatcher(None, n1, n2).ratio()
+    are_synonyms = sim >= 0.85
+    return {"similarity": round(float(sim), 3), "are_synonyms": bool(are_synonyms)}
+
+
+def _build_candidate_pairs(names: List[str]) -> List[Dict[str, Any]]:
+    """
+    Build a small, high-signal set of candidate duplicate pairs to keep the LLM focused.
+    """
+    candidates: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str]] = set()
+
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            e1 = names[i]
+            e2 = names[j]
+            key = (e1, e2)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            sim = _name_similarity(e1, e2)
+            if sim["are_synonyms"] or sim["similarity"] >= 0.80:
+                candidates.append(
+                    {
+                        "entity1": e1,
+                        "entity2": e2,
+                        "similarity": sim["similarity"],
+                        "are_synonyms": sim["are_synonyms"],
+                    }
+                )
+
+    # Sort most similar first for readability
+    candidates.sort(key=lambda x: (x.get("are_synonyms", False), x.get("similarity", 0.0)), reverse=True)
+    return candidates
 
 
 class MergeDecisionEvidence(BaseModel):
@@ -139,7 +200,9 @@ async def step_1_7_entity_consolidation(
     # NOTE: We intentionally avoid domain/nl_description to reduce bias-driven merges.
     system_prompt = """You are an entity deduplication assistant for database schema extraction.
 
-Input includes: (a) a list of candidate entities with 1-line definitions and origin tags, and (b) optional tool-provided name similarity scores for some pairs.
+Input includes:
+1) EntityRegistry: a list of candidate entities with 1-line definitions and origin tags.
+2) CandidatePairs: a precomputed, deterministic list of potentially duplicate pairs with similarity hints.
 
 Your job: decide which entities should be merged, which should remain distinct, and whether any entities should be renamed for clarity.
 
@@ -147,7 +210,7 @@ Rules:
 - Only merge if they represent the same real-world concept at the same grain (e.g., both are "event", or both are "type/lookup", or both are "physical object instance").
 - Do not merge merely because names are similar. Similarity scores are hints, not proof.
 - If two entities are related but different grains (e.g., "Type" vs "Instance", "Lookup" vs "Event", "Header" vs "Junction"), they must remain separate.
-- If you merge, output a canonical merged_entity_name that is SQL-safe and clearer than either original.
+- If you merge, set merged_entity_name to ONE OF the ORIGINAL entity names (entity1 or entity2). Do not invent new names.
 - Every decision must include evidence: definition_overlap + grain check + at least one counterexample if you choose NOT to merge.
 
 Output schema (STRICT - must match exactly):
@@ -177,27 +240,15 @@ Output schema (STRICT - must match exactly):
   "final_entities": ["string"]
 }
 
-Tool usage (mandatory)
-You have access to:
-1) check_entity_name_similarity(entity1: str, entity2: str) -> {similarity: float, are_synonyms: bool}
-2) check_entity_name_validity(name: str) -> {valid: bool, error: str|null, suggestion: str|null}
-3) validate_merge_decision(should_merge: bool, merged_entity_name: str|null) -> {valid: bool, error: str|null}
-4) validate_final_entities(entities: List[str]) -> {all_valid: bool, invalid_entities: List[str], errors: List[str]}
-
-Before finalizing your response:
-1) For each entity pair in merge_decisions:
-   a) Call check_entity_name_similarity with:
-      {"entity1": "<entity1>", "entity2": "<entity2>"}
-2) For each merged_entity_name (if should_merge=true), validate the name using check_entity_name_validity.
-3) Validate invariants with validate_merge_decision for EACH merge decision.
-4) Validate final_entities with validate_final_entities.
-
 Output MUST be valid JSON matching the schema above. Output JSON only. No markdown. No extra keys."""
     
     # Human prompt template: structured registry only
     import json
     human_prompt = """EntityRegistry (JSON):
 {entity_registry_json}
+
+CandidatePairs (JSON):
+{candidate_pairs_json}
 """
     
     # Initialize model
@@ -206,19 +257,20 @@ Output MUST be valid JSON matching the schema above. Output JSON only. No markdo
     try:
         logger.debug("Invoking LLM for entity consolidation")
         config = get_trace_config("1.7", phase=1, tags=["entity_consolidation"])
+
+        candidate_pairs = _build_candidate_pairs([x["name"] for x in registry_items if x.get("name")])
+
         result: EntityConsolidationOutput = await standardized_llm_call(
             llm=llm,
             output_schema=EntityConsolidationOutput,
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
-            input_data={"entity_registry_json": json.dumps(registry_items, indent=2, ensure_ascii=False)},
-            tools=[
-                check_entity_name_similarity,
-                check_entity_name_validity,
-                validate_merge_decision,
-                validate_final_entities,
-            ],
-            use_agent_executor=True,  # Use agent executor for tool calls
+            input_data={
+                "entity_registry_json": json.dumps(registry_items, indent=2, ensure_ascii=False),
+                "candidate_pairs_json": json.dumps(candidate_pairs, indent=2, ensure_ascii=False),
+            },
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
         

@@ -21,10 +21,10 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.phases.phase1.utils.entity_reclassification import pick_associative_candidates
-from NL2DATA.utils.tools import (
-    verify_entity_in_known_entities,
-    check_entity_name_validity,
-    validate_subset,
+from NL2DATA.utils.tools.validation_tools import (
+    _verify_entity_in_known_entities_impl,
+    _check_entity_name_validity_impl,
+    _validate_subset_impl,
 )
 
 
@@ -220,14 +220,50 @@ Use tools to validate: candidate subset membership, endpoint membership, and nam
             input_data={
                 "context_json": context_json_str,
             },
-            tools=[verify_entity_in_known_entities, check_entity_name_validity, validate_subset],
-            use_agent_executor=True,
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
 
         # Enforce safety: only accept decisions about candidates.
         llm_keep = {n for n in (out.keep_entities or []) if n in set(candidate_names)}
         llm_reclass = {r.name for r in (out.reclassify_as_relation or []) if r.name in set(candidate_names)}
+
+        # Deterministic validation of subsets and endpoints
+        subset_check_1 = _validate_subset_impl(list(llm_keep), candidate_names)
+        subset_check_2 = _validate_subset_impl(list(llm_reclass), candidate_names)
+        if not subset_check_1.get("is_subset", True) or not subset_check_2.get("is_subset", True):
+            logger.warning("Step 1.75: LLM returned invalid subsets; falling back to KEEP all candidates.")
+            keep_set = set(candidate_names)
+            reclass_set = set()
+            break
+
+        # Validate endpoints (must be from entity registry payload names)
+        registry_names = [x.get("name", "") for x in entity_registry_payload if x.get("name")]
+        endpoints_ok = True
+        for item in out.reclassify_as_relation or []:
+            if item.name not in set(candidate_names):
+                continue
+            left = (item.endpoints or {}).get("left", "")
+            right = (item.endpoints or {}).get("right", "")
+            if not _verify_entity_in_known_entities_impl(left, registry_names).get("exists", False):
+                endpoints_ok = False
+                break
+            if not _verify_entity_in_known_entities_impl(right, registry_names).get("exists", False):
+                endpoints_ok = False
+                break
+            # Light name validity check (should be SQL-safe identifiers)
+            if not _check_entity_name_validity_impl(left).get("valid", False):
+                endpoints_ok = False
+                break
+            if not _check_entity_name_validity_impl(right).get("valid", False):
+                endpoints_ok = False
+                break
+        if not endpoints_ok:
+            logger.warning("Step 1.75: LLM returned invalid endpoints; falling back to KEEP all candidates.")
+            keep_set = set(candidate_names)
+            reclass_set = set()
+            break
 
         # If model gave nothing useful, keep everything (conservative).
         if not llm_keep and not llm_reclass:

@@ -10,7 +10,7 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
-from NL2DATA.utils.tools import verify_evidence_substring
+from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
 
 logger = get_logger(__name__)
 
@@ -101,14 +101,6 @@ Constraints
 - evidence phrases must be exact substrings from the input.
 - reasoning must be <= 35 words and must reference the evidence.
 
-Tool usage (mandatory)
-You have access to: verify_evidence_substring(evidence: str, nl_description: str) -> {is_substring: bool, error: str|null}
-Before finalizing your response:
-1) For EACH evidence phrase in the evidence array, call verify_evidence_substring with:
-   {"evidence": "<evidence_phrase>", "nl_description": "<full_nl_description>"}
-2) If is_substring = false for any evidence phrase, correct it to be an exact substring from nl_description, then re-check.
-3) For alternatives, also verify each evidence phrase in their evidence arrays.
-
 No extra text. No markdown. No code fences."""
     
     # Human prompt template
@@ -126,11 +118,57 @@ No extra text. No markdown. No code fences."""
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description},
-            tools=[verify_evidence_substring],
-            use_agent_executor=True,
-            agent_max_iterations=30,
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
+
+        # Deterministic evidence enforcement:
+        # Keep only evidence phrases that are verbatim substrings. If none remain, fall back to "general".
+        cleaned_evidence: List[str] = []
+        seen: set[str] = set()
+        for ev in result.evidence or []:
+            evs = (ev or "").strip()
+            if not evs:
+                continue
+            if not _verify_evidence_substring_impl(evs, nl_description).get("is_substring", False):
+                continue
+            key = evs.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned_evidence.append(evs)
+
+        cleaned_alts: List[DomainAlternative] = []
+        for alt in result.alternatives or []:
+            alt_evidence: List[str] = []
+            seen_alt: set[str] = set()
+            for ev in alt.evidence or []:
+                evs = (ev or "").strip()
+                if not evs:
+                    continue
+                if not _verify_evidence_substring_impl(evs, nl_description).get("is_substring", False):
+                    continue
+                key = evs.lower()
+                if key in seen_alt:
+                    continue
+                seen_alt.add(key)
+                alt_evidence.append(evs)
+            cleaned_alts.append(alt.model_copy(update={"evidence": alt_evidence}))
+
+        if not cleaned_evidence:
+            # If the model can't ground evidence, keep the pipeline stable and conservative.
+            result = result.model_copy(
+                update={
+                    "primary_domain": "general",
+                    "confidence": min(float(result.confidence or 0.0), 0.39),
+                    "evidence": [],
+                    "alternatives": [],
+                    "reasoning": "Insufficient grounded evidence phrases; defaulting to general.",
+                }
+            )
+        else:
+            result = result.model_copy(update={"evidence": cleaned_evidence, "alternatives": cleaned_alts})
         
         # Work with Pydantic model directly
         logger.info(f"Domain inference completed: primary_domain={result.primary_domain}, confidence={result.confidence:.2f}")

@@ -34,7 +34,14 @@ class ConnectivityValidationOutput(BaseModel):
         default_factory=list,
         description="List of suggested relations to connect orphan entities"
     )
-    reasoning: str = Field(description="Explanation of connectivity analysis and recommendations")
+    # NOTE:
+    # Some LLM tool-calling paths occasionally emit an empty tool payload `{}`.
+    # If `reasoning` is required, Pydantic validation fails and the entire pipeline aborts.
+    # We therefore provide a safe default and fill in a deterministic fallback reasoning in code.
+    reasoning: str = Field(
+        default="",
+        description="Explanation of connectivity analysis and recommendations"
+    )
     
     model_config = ConfigDict(extra="forbid")
 
@@ -84,6 +91,25 @@ async def step_1_10_schema_connectivity(
     # Build entity and relation lists using utilities
     entity_list_str = build_entity_list_string(entities, include_descriptions=False, prefix="- ")
     relation_list_str = build_relation_list_string(relations)
+
+    # Deterministic baseline connectivity (do not rely on LLM for orphan detection)
+    entity_names: List[str] = [extract_entity_name(e) for e in entities]
+    baseline_connectivity_status: Dict[str, bool] = {}
+    baseline_orphan_entities: List[str] = []
+
+    for entity_name in entity_names:
+        conn = _check_entity_connectivity_impl(entity_name, relations)
+        is_connected = bool(conn.get("is_connected", False))
+        baseline_connectivity_status[entity_name] = is_connected
+        if not is_connected:
+            baseline_orphan_entities.append(entity_name)
+
+    baseline_reasoning = (
+        f"Deterministic connectivity check: {len(baseline_orphan_entities)} orphan entities found. "
+        f"Orphans: {baseline_orphan_entities}"
+        if baseline_orphan_entities
+        else "Deterministic connectivity check: all entities are connected (no orphans found)."
+    )
     
     # System prompt
     system_prompt = """You are a database design assistant. Your task is to validate that all entities in a database schema are connected through relationships.
@@ -125,19 +151,14 @@ Provide your response as a JSON object with:
 Relations in the schema:
 {{relation_list}}
 
+Deterministic connectivity check (baseline):
+- Orphan entities: {baseline_orphan_entities}
+
 Original description (if available):
 {{nl_description}}"""
     
     # Initialize model
     llm = get_model_for_step("1.10")  # Step 1.10 maps to "reasoning" task type
-    
-    # Create bound version of check_entity_connectivity with schema_state
-    schema_state = {"entities": entities, "relations": relations}
-    def check_entity_connectivity_bound(entity: str) -> Dict[str, Any]:
-        """Bound version of check_entity_connectivity with schema_state."""
-        # IMPORTANT: check_entity_connectivity is a LangChain @tool (StructuredTool) and is not callable.
-        # Use the pure implementation to avoid "'StructuredTool' object is not callable".
-        return _check_entity_connectivity_impl(entity, relations)
     
     try:
         logger.debug("Invoking LLM for schema connectivity validation")
@@ -152,19 +173,18 @@ Original description (if available):
                 "relation_list": relation_list_str,
                 "nl_description": nl_description or "",
             },
-            tools=[check_entity_connectivity_bound],
-            use_agent_executor=True,  # Use agent executor for tool calls
-            decouple_tools=True,  # Decouple tool calling from JSON generation
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
         
-        # Work with Pydantic model directly
-        orphan_count = len(result.orphan_entities)
+        # Trust deterministic connectivity for control flow; keep LLM for suggestions/reasoning.
+        orphan_count = len(baseline_orphan_entities)
         logger.info(f"Schema connectivity validation completed: {orphan_count} orphan entities found")
         
         if orphan_count > 0:
-            logger.warning(f"Orphan entities detected: {', '.join(result.orphan_entities)}")
-            suggested_count = len(result.suggested_relations)
+            logger.warning(f"Orphan entities detected: {', '.join(baseline_orphan_entities)}")
+            suggested_count = len(result.suggested_relations or [])
             if suggested_count > 0:
                 logger.info(f"Suggested {suggested_count} relations to connect orphans")
         else:
@@ -172,14 +192,27 @@ Original description (if available):
         
         # Convert to dict and add iteration info for loop tracking
         result_dict = result.model_dump()
+        result_dict["orphan_entities"] = baseline_orphan_entities
+        result_dict["connectivity_status"] = baseline_connectivity_status
+        if not (result_dict.get("reasoning") or "").strip():
+            result_dict["reasoning"] = baseline_reasoning
         result_dict["iteration"] = iteration_num
         result_dict["needs_loop"] = orphan_count > 0
         
         return result_dict
         
     except Exception as e:
+        # Do not abort the pipeline on LLM/tooling errors: return deterministic connectivity results.
         logger.error(f"Error in schema connectivity validation: {e}", exc_info=True)
-        raise
+
+        return {
+            "orphan_entities": baseline_orphan_entities,
+            "connectivity_status": baseline_connectivity_status,
+            "suggested_relations": [],
+            "reasoning": baseline_reasoning,
+            "iteration": iteration_num,
+            "needs_loop": len(baseline_orphan_entities) > 0,
+        }
 
 
 async def step_1_10_schema_connectivity_with_loop(
@@ -203,7 +236,10 @@ async def step_1_10_schema_connectivity_with_loop(
         max_time_sec: Maximum wall time in seconds (default: 180)
         
     Returns:
-        dict: Final connectivity validation result with loop metadata
+        dict: Final connectivity validation result with loop metadata.
+              Also includes `updated_relations` (the relation list after applying any
+              connectivity-suggested relations) so downstream steps can use the
+              modified ER graph.
         
     Example:
         >>> result = await step_1_10_schema_connectivity_with_loop(
@@ -217,6 +253,10 @@ async def step_1_10_schema_connectivity_with_loop(
     
     logger.info("Starting Step 1.10: Schema Connectivity Validation (with loop support)")
     
+    # NOTE:
+    # We intentionally maintain a working relation list (`current_relations`) that can be
+    # augmented with connectivity-suggested relations during the loop. The caller may
+    # optionally use `updated_relations` downstream.
     current_relations = relations.copy()
     loop_history = []
     
@@ -226,7 +266,58 @@ async def step_1_10_schema_connectivity_with_loop(
         
         Example: "Anomaly is detected by Sensor" -> {"entities": ["Anomaly", "Sensor"], "description": "Anomaly is detected by Sensor"}
         """
-        entity_names = {extract_entity_name(e) for e in entities}
+        import re
+
+        def _camel_to_words(name: str) -> str:
+            # "SensorType" -> "sensor type"; "IoTDevice" -> "io t device" (acceptable best-effort)
+            s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name or "")
+            return " ".join(s.split()).strip().lower()
+
+        def _to_snake(name: str) -> str:
+            # "SensorType" -> "sensor_type"
+            s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name or "")
+            return re.sub(r"_+", "_", s).strip("_").lower()
+
+        def _variants(canonical: str) -> List[str]:
+            c = (canonical or "").strip()
+            if not c:
+                return []
+            snake = _to_snake(c)
+            words = _camel_to_words(c)
+            variants = [
+                c,
+                c.lower(),
+                snake,
+                snake.replace("_", " "),
+                words,
+            ]
+            # naive plural for last token (helps match "sensors" vs "Sensor")
+            if words and " " in words:
+                parts = words.split()
+                variants.append(" ".join(parts[:-1] + [parts[-1] + "s"]))
+            elif words:
+                variants.append(words + "s")
+            # De-dup while preserving order
+            out: List[str] = []
+            seen: set[str] = set()
+            for v in variants:
+                vv = (v or "").strip().lower()
+                if vv and vv not in seen:
+                    out.append(v)
+                    seen.add(vv)
+            return out
+
+        # canonical entity names
+        entity_names = sorted({extract_entity_name(e) for e in entities if extract_entity_name(e)})
+
+        # precompute regex patterns for each canonical entity name (variants)
+        patterns: Dict[str, List[re.Pattern]] = {}
+        for canonical in entity_names:
+            pats: List[re.Pattern] = []
+            for v in _variants(canonical):
+                # Use word boundary-ish matching; allow spaces/underscores by matching exact variant text.
+                pats.append(re.compile(r"\b" + re.escape(v) + r"\b", re.IGNORECASE))
+            patterns[canonical] = pats
         parsed_relations = []
         
         for suggested_rel in suggested_relations:
@@ -235,12 +326,11 @@ async def step_1_10_schema_connectivity_with_loop(
             
             # Try to find entity names in the suggested relation string
             found_entities = []
-            for entity_name in entity_names:
-                # Check if entity name appears in the relation string (case-insensitive, whole word)
-                import re
-                pattern = r'\b' + re.escape(entity_name) + r'\b'
-                if re.search(pattern, suggested_rel, re.IGNORECASE):
-                    found_entities.append(entity_name)
+            for canonical in entity_names:
+                for pat in patterns.get(canonical, []):
+                    if pat.search(suggested_rel):
+                        found_entities.append(canonical)
+                        break
             
             # Only create relation if we found at least 2 entities
             if len(found_entities) >= 2:
@@ -273,32 +363,65 @@ async def step_1_10_schema_connectivity_with_loop(
         )
         loop_history.append(result)
         
-        # If orphans found and relations suggested, add them to current_relations for next iteration
-        if result.get("orphan_entities") and result.get("suggested_relations"):
-            suggested = result.get("suggested_relations", [])
-            parsed = _parse_suggested_relations(suggested, entities)
-            
-            if parsed:
-                # Check if relations already exist (avoid duplicates)
-                existing_relation_keys = {
-                    tuple(sorted(rel.get("entities", []))) for rel in current_relations
-                }
-                
+        # If orphans found, actively try to enrich the ER graph for the next iteration.
+        # 1) Prefer looping back to Step 1.9 (key relations extraction) with orphan guidance.
+        # 2) Also accept Step 1.10 textual suggestions as a secondary source.
+        orphan_entities = result.get("orphan_entities") or []
+        if orphan_entities:
+            try:
+                from NL2DATA.phases.phase1.step_1_9_key_relations_extraction import (
+                    step_1_9_key_relations_extraction,
+                )
+
+                relation_result = await step_1_9_key_relations_extraction(
+                    entities=entities,
+                    nl_description=nl_description or "",
+                    domain=None,
+                    mentioned_relations=None,
+                    focus_entities=orphan_entities,
+                )
+                candidate_relations = relation_result.get("relations", []) if isinstance(relation_result, dict) else []
+            except Exception as e:
+                logger.warning(
+                    f"Step 1.10 loop: failed to re-run Step 1.9 for orphan entities. error={e}",
+                    exc_info=True,
+                )
+                candidate_relations = []
+
+            # Secondary source: Step 1.10's own suggested_relations (string descriptions)
+            suggested = result.get("suggested_relations") or []
+            parsed = _parse_suggested_relations(suggested, entities) if suggested else []
+            candidate_relations.extend(parsed)
+
+            if candidate_relations:
+                def _rel_key(rel: Dict[str, Any]) -> tuple:
+                    ents = rel.get("entities", []) or []
+                    ents_key = tuple(sorted([str(e).strip() for e in ents if str(e).strip()]))
+                    rel_type = str(rel.get("type", "") or "").strip().lower()
+                    desc = str(rel.get("description", "") or "").strip().lower()
+                    return (ents_key, rel_type, desc)
+
+                existing_keys = {_rel_key(r) for r in current_relations if isinstance(r, dict)}
                 new_relations = []
-                for rel in parsed:
-                    rel_key = tuple(sorted(rel.get("entities", [])))
-                    if rel_key not in existing_relation_keys:
+                for rel in candidate_relations:
+                    if not isinstance(rel, dict):
+                        continue
+                    k = _rel_key(rel)
+                    # Require at least two entities for any new relation
+                    if not k[0] or len(k[0]) < 2:
+                        continue
+                    if k not in existing_keys:
                         new_relations.append(rel)
-                        existing_relation_keys.add(rel_key)
-                
+                        existing_keys.add(k)
+
                 if new_relations:
                     current_relations.extend(new_relations)
                     logger.info(
-                        f"Added {len(new_relations)} suggested relations to resolve orphan entities. "
+                        f"Step 1.10 loop: added {len(new_relations)} new relations to resolve orphan entities. "
                         f"Total relations: {len(current_relations)}"
                     )
                 else:
-                    logger.debug("All suggested relations already exist in current relations")
+                    logger.debug("Step 1.10 loop: no new unique relations to add")
         
         return result
     
@@ -338,10 +461,11 @@ async def step_1_10_schema_connectivity_with_loop(
     
     return {
         "final_result": final_result,
+        "updated_relations": current_relations,
         "loop_metadata": {
             "iterations": loop_result["iterations"],
             "terminated_by": loop_result["terminated_by"],
-            "history": loop_history
-        }
+            "history": loop_history,
+        },
     }
 

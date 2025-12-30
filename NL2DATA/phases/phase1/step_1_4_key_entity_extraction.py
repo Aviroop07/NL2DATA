@@ -11,7 +11,6 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.ir.models.state import EntityInfo
-from NL2DATA.utils.tools import check_entity_name_validity, verify_evidence_substring
 
 logger = get_logger(__name__)
 
@@ -88,6 +87,41 @@ async def step_1_4_key_entity_extraction(
     prior_context_lines.append('naming_convention: "PascalCase singular"')
 
     prior_context = "\n".join(prior_context_lines)
+
+    def _is_sql_safe_identifier(name: str) -> bool:
+        import re
+        n = (name or "").strip()
+        if not n:
+            return False
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", n):
+            return False
+        # Conservative reserved keyword check (subset)
+        sql_keywords = {
+            "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+            "ALTER", "TABLE", "INDEX", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
+            "CONSTRAINT", "UNIQUE", "NOT", "NULL", "DEFAULT", "CHECK", "AND", "OR",
+        }
+        return n.upper() not in sql_keywords
+
+    def _sanitize_identifier(name: str) -> str:
+        """
+        Best-effort sanitizer that preserves readability.
+        """
+        import re
+        raw = (name or "").strip()
+        if not raw:
+            return "Entity"
+        cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+        if not cleaned:
+            cleaned = "Entity"
+        if not cleaned[0].isalpha():
+            cleaned = f"Entity_{cleaned}"
+        # Avoid reserved keywords (subset)
+        if not _is_sql_safe_identifier(cleaned):
+            cleaned = f"{cleaned}_Entity"
+        # Collapse multiple underscores
+        cleaned = re.sub(r"_+", "_", cleaned)
+        return cleaned
     
     system_prompt = """You are an information-extraction assistant.
 
@@ -127,19 +161,6 @@ Naming rules
 De-duplication
 - De-duplicate semantically identical entities; pick the most canonical name.
 
-Tool usage (mandatory)
-You have access to two tools:
-1) check_entity_name_validity(name: str) -> {valid: bool, error: str|null, suggestion: str|null}
-2) verify_evidence_substring(evidence: str, nl_description: str) -> {is_substring: bool, error: str|null}
-
-Before finalizing your response:
-1) Call check_entity_name_validity for EACH entity.name:
-   {"name": "<candidate_name>"}
-2) If valid=false, fix the name (use suggestion if present) and re-check.
-3) Call verify_evidence_substring for EACH entity.evidence:
-   {"evidence": "<entity.evidence>", "nl_description": "<full_nl_description>"}
-4) If is_substring=false, correct the evidence to be an exact substring, then re-check.
-
 Output requirements (MUST follow)
 Return ONLY a JSON object that matches this schema exactly:
 {
@@ -178,10 +199,30 @@ prior_context:
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description, "prior_context": prior_context},
-            tools=[check_entity_name_validity, verify_evidence_substring],
-            use_agent_executor=True,  # Use agent executor for tool calls
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
+
+        # Post-validate: drop entities whose evidence is not a verbatim substring (strict grounding)
+        filtered_entities: List[EntityInfo] = []
+        seen_names: set[str] = set()
+        for ent in result.entities:
+            name = (ent.name or "").strip()
+            evidence = (ent.evidence or "").strip()
+            if not evidence or evidence not in nl_description:
+                continue
+
+            if not _is_sql_safe_identifier(name):
+                name = _sanitize_identifier(name)
+
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+
+            filtered_entities.append(ent.model_copy(update={"name": name}))
+
+        result = EntityExtractionOutput(entities=filtered_entities)
         
         # Work with Pydantic model directly (not dict)
         entity_count = len(result.entities)

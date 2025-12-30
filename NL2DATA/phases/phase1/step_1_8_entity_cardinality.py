@@ -14,7 +14,7 @@ from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_entity_name,
     extract_entity_description,
 )
-from NL2DATA.utils.tools import verify_evidence_substring
+from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
 
 logger = get_logger(__name__)
 
@@ -116,13 +116,6 @@ Provide:
 - table_type: "fact" or "dimension", or null if cannot be determined
 - reasoning: REQUIRED - Clear explanation of your decisions (cannot be omitted)
 
-Tool usage (mandatory when has_explicit_cardinality = true)
-You have access to: verify_evidence_substring(evidence: str, nl_description: str) -> {is_substring: bool, error: str|null}
-Before finalizing:
-1) If has_explicit_cardinality=true, call verify_evidence_substring with:
-   {"evidence": "<cardinality_hint>", "nl_description": "<full_nl_description>"}
-2) If is_substring=false, fix cardinality_hint to be an exact substring, then re-check.
-
 Output schema (STRICT)
 Return ONLY JSON with exactly:
 {
@@ -153,10 +146,23 @@ Original description (if available):
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description or ""},
-            tools=[verify_evidence_substring],
-            use_agent_executor=True,
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
+
+        # Deterministic grounding enforcement for cardinality_hint
+        if result.has_explicit_cardinality:
+            hint = (result.cardinality_hint or "").strip()
+            if not hint:
+                result = result.model_copy(update={"has_explicit_cardinality": False, "cardinality_hint": ""})
+            else:
+                check = _verify_evidence_substring_impl(hint, nl_description or "")
+                if not check.get("is_substring", False):
+                    result = result.model_copy(update={"has_explicit_cardinality": False, "cardinality_hint": ""})
+        else:
+            if result.cardinality_hint:
+                result = result.model_copy(update={"cardinality_hint": ""})
         
         # Work with Pydantic model directly
         logger.debug(
@@ -233,7 +239,7 @@ async def step_1_8_entity_cardinality(
                 "entity": entity_name,
                 "has_explicit_cardinality": False,
                 "cardinality": None,
-                "cardinality_hint": None,
+                "cardinality_hint": "",
                 "table_type": None,
                 "reasoning": f"Error during analysis: {str(result)}"
             })

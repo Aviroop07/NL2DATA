@@ -81,6 +81,7 @@ from NL2DATA.phases.phase7 import (
 from NL2DATA.utils.logging import setup_logging, get_logger
 from NL2DATA.config import get_config
 from NL2DATA.utils.rate_limiting.singleton import reset_rate_limiter
+from NL2DATA.tests.utils.debug_dump import log_json
 
 def read_nl_descriptions(file_path: str) -> List[str]:
     """Read all NL descriptions from a text file, separated by double newlines."""
@@ -91,8 +92,19 @@ def read_nl_descriptions(file_path: str) -> List[str]:
     descriptions = [desc.strip() for desc in content.split('\n\n') if desc.strip()]
     return descriptions
 
-async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, description_index: int = None):
-    """Test Phases 1, 2, 3, 4, 5, 6, and 7 with a single NL description."""
+async def test_phases_1_2_3_4_5_6_7_integration(
+    nl_description: str = None,
+    description_index: int = None,
+    max_phase: int = None,
+    log_file_override: str = None,
+):
+    """Test Phases 1, 2, 3, 4, 5, 6, and 7 with a single NL description.
+    
+    Args:
+        nl_description: Natural language description to process
+        description_index: Optional index for logging purposes
+        max_phase: Maximum phase to run (1-7). If None, runs all phases.
+    """
     # Use default description if none provided
     if nl_description is None:
         nl_description = """Create an IoT telemetry dataset for 10,000 industrial sensors deployed across 100 plants. There should be one high-frequency fact table called sensor_reading with at least 200 million rows over a 30-day period, plus dimension tables for sensors, plants, and sensor types. Sensor readings (temperature, vibration, current) should mostly remain within normal operating bands that differ by sensor type, with rare anomalies (0.1–0.5% of readings) modeled as spikes, drifts, or sudden step changes. Inject 3–5 "cascading failure" incidents in which a single plant experiences coordinated anomalies across many sensors in a narrow time window, and each incident is preceded by subtle early-warning deviations. Timestamps should be approximately uniform over time but with random missing intervals per sensor to simulate connectivity issues. Include synthetic maintenance events that reset some sensors' behavior. The data should stress time-series joins, anomaly detection queries, and "before/after incident" window aggregations."""
@@ -100,8 +112,8 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
     logger = get_logger(__name__)
     log_config = get_config('logging')
     
-    # Use the same log file for all descriptions
-    log_file = log_config.get('log_file')
+    # Use the same log file for all descriptions, unless overridden by caller
+    log_file = log_file_override or log_config.get('log_file')
     
     setup_logging(
         level=log_config['level'],
@@ -134,6 +146,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         # Step 1.1: Domain Detection
         print("\n[Phase 1.1] Domain Detection...")
         result_1_1 = await step_1_1_domain_detection(nl_description)
+        log_json(logger, "Phase 1.1 Domain Detection result", result_1_1)
         domain = result_1_1.get("domain", "")
         state["domain"] = domain
         print(f"  Domain: {domain}")
@@ -141,17 +154,20 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         # Step 1.2: Entity Mention Detection
         print("\n[Phase 1.2] Entity Mention Detection...")
         result_1_2 = await step_1_2_entity_mention_detection(nl_description)
+        log_json(logger, "Phase 1.2 Entity Mention Detection result", result_1_2)
         mentioned_entities = result_1_2.get("mentioned_entities", [])
         state["mentioned_entities"] = mentioned_entities
         try:
             mentioned_entity_names = [e.get("name", "") for e in mentioned_entities if isinstance(e, dict)]
         except Exception:
             mentioned_entity_names = []
+        log_json(logger, "Phase 1.2 mentioned_entity_names (derived)", mentioned_entity_names)
         print(f"  Mentioned entities: {', '.join([n for n in mentioned_entity_names if n])}")
         
         # Step 1.3: Domain Inference
         print("\n[Phase 1.3] Domain Inference...")
         result_1_3 = await step_1_3_domain_inference(nl_description, domain_detection_result=result_1_1)
+        log_json(logger, "Phase 1.3 Domain Inference result", result_1_3)
         inferred_domain = result_1_3.get("primary_domain", domain)
         state["domain"] = inferred_domain
         print(f"  Inferred domain: {inferred_domain}")
@@ -164,6 +180,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
             mentioned_entities=mentioned_entity_names,
             entity_mention_result=result_1_2,
         )
+        log_json(logger, "Phase 1.4 Key Entity Extraction result", result_1_4)
         key_entities = result_1_4.get("entities", [])
         state["key_entities"] = key_entities
         print(f"  Key entities: {len(key_entities)}")
@@ -173,6 +190,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         # Step 1.5: Relation Mention Detection
         print("\n[Phase 1.5] Relation Mention Detection...")
         result_1_5 = await step_1_5_relation_mention_detection(nl_description, entities=key_entities)
+        log_json(logger, "Phase 1.5 Relation Mention Detection result", result_1_5)
         explicit_relations = result_1_5.get("relations", [])
         state["explicit_relations"] = explicit_relations
         print(f"  Explicit relations: {len(explicit_relations)}")
@@ -182,6 +200,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         result_1_6 = await step_1_6_auxiliary_entity_suggestion(
             nl_description, key_entities=key_entities, domain=inferred_domain
         )
+        log_json(logger, "Phase 1.6 Auxiliary Entity Suggestion result", result_1_6)
         auxiliary_entities = result_1_6.get("suggested_entities", [])
         state["auxiliary_entities"] = auxiliary_entities
         print(f"  Auxiliary entities: {len(auxiliary_entities)}")
@@ -191,11 +210,13 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         result_1_7 = await step_1_7_entity_consolidation(
             key_entities, auxiliary_entities=auxiliary_entities, domain=inferred_domain, nl_description=nl_description
         )
+        log_json(logger, "Phase 1.7 Entity Consolidation result", result_1_7)
         final_entity_names = result_1_7.get("final_entities", [])
         # Reconstruct consolidated entities from final entity list
         all_entities_dict = {e.get("name", ""): e for e in key_entities + auxiliary_entities}
         consolidated_entities = [all_entities_dict[name] for name in final_entity_names if name in all_entities_dict]
         state["entities"] = consolidated_entities
+        log_json(logger, "Phase 1.7 consolidated_entities (reconstructed)", consolidated_entities)
         print(f"  Consolidated entities: {len(consolidated_entities)}")
 
         # Step 1.75: Entity vs Relation Reclassification (associative-link guardrail)
@@ -203,6 +224,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         result_1_75 = await step_1_75_entity_relation_reclassification(
             consolidated_entities, nl_description, domain=inferred_domain
         )
+        log_json(logger, "Phase 1.75 Entity vs Relation Reclassification result", result_1_75)
         consolidated_entities = result_1_75.get("entities", consolidated_entities)
         state["entities"] = consolidated_entities
         removed = result_1_75.get("removed_entity_names", [])
@@ -216,6 +238,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         result_1_8 = await step_1_8_entity_cardinality(
             consolidated_entities, nl_description, domain=inferred_domain
         )
+        log_json(logger, "Phase 1.8 Entity Cardinality result", result_1_8)
         entity_info_1_8 = result_1_8.get("entity_info", [])
         print(f"  Entity cardinalities identified for {len(entity_info_1_8)} entities")
         
@@ -224,6 +247,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         result_1_9 = await step_1_9_key_relations_extraction(
             consolidated_entities, nl_description, domain=inferred_domain, mentioned_relations=explicit_relations
         )
+        log_json(logger, "Phase 1.9 Key Relations Extraction result", result_1_9)
         key_relations = result_1_9.get("relations", [])
         state["relations"] = key_relations
         print(f"  Key relations: {len(key_relations)}")
@@ -234,15 +258,34 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
             consolidated_entities, key_relations, nl_description=nl_description,
             max_iterations=5, max_time_sec=180
         )
+        log_json(logger, "Phase 1.10 Schema Connectivity (with loop) result", result_1_10)
         connectivity_result = result_1_10.get("final_result", {})
+        log_json(logger, "Phase 1.10 connectivity_result (derived)", connectivity_result)
         orphan_count = len(connectivity_result.get("orphan_entities", []))
         print(f"  Connectivity validation: orphan_entities={orphan_count}")
+
+        # If Step 1.10 added relations to resolve connectivity, propagate them downstream.
+        updated_relations = result_1_10.get("updated_relations", key_relations)
+        try:
+            before_count = len(key_relations) if isinstance(key_relations, list) else 0
+            after_count = len(updated_relations) if isinstance(updated_relations, list) else 0
+        except Exception:
+            before_count, after_count = 0, 0
+        if isinstance(updated_relations, list) and after_count != before_count:
+            logger.info(
+                f"Phase 1.10 updated relation list for downstream steps: "
+                f"{before_count} -> {after_count}"
+            )
+        log_json(logger, "Phase 1.10 updated_relations (propagated downstream)", updated_relations)
+        key_relations = updated_relations
+        state["relations"] = key_relations
         
         # Step 1.11: Relation Cardinality
         print("\n[Phase 1.11] Relation Cardinality...")
         result_1_11 = await step_1_11_relation_cardinality(
             key_relations, consolidated_entities, nl_description=nl_description
         )
+        log_json(logger, "Phase 1.11 Relation Cardinality result", result_1_11)
         # Step 1.11 returns {"relation_cardinalities": [list]} - convert to dict keyed by relation_id
         relation_cardinalities_list = result_1_11.get("relation_cardinalities", [])
         # Convert list to dict using same relation_id format as step_2_14: "Entity1+Entity2"
@@ -252,6 +295,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
             if entities_in_rel:
                 relation_id = f"{'+'.join(sorted(entities_in_rel))}"
                 relation_results_1_11[relation_id] = rel_card
+        log_json(logger, "Phase 1.11 relation_results_1_11 (derived)", relation_results_1_11)
         print(f"  Relation cardinalities identified for {len(relation_results_1_11)} relations")
         
         # Step 1.12: Relation Validation (with loop)
@@ -262,10 +306,17 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
             consolidated_entities, key_relations, relation_cardinalities=relation_cardinalities_list,
             nl_description=nl_description, max_iterations=5, max_time_sec=180
         )
+        log_json(logger, "Phase 1.12 Relation Validation (with loop) result", result_1_12)
         validation_result = result_1_12.get("final_result", {})
+        log_json(logger, "Phase 1.12 validation_result (derived)", validation_result)
         print(f"  Relation validation: {validation_result.get('validation_passed', False)}")
         
         print("\n[PASS] Phase 1 completed")
+        log_json(logger, "Phase 1 state snapshot", state)
+
+        if max_phase and max_phase < 2:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 1.")
+            return all_passed
         
         # ========================================================================
         # PHASE 2: Attribute Discovery & Schema Design
@@ -484,6 +535,10 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         
         print("\n[PASS] Phase 2 completed")
         
+        if max_phase and max_phase < 3:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 2.")
+            return all_passed
+        
         # ========================================================================
         # PHASE 3: Query Requirements & Schema Refinement
         # ========================================================================
@@ -616,6 +671,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
             print(f"    - {table.get('name', '')}: {len(table.get('columns', []))} columns")
         
         print("\n[PASS] Phase 3 completed")
+        
         
         # ========================================================================
         # PHASE 4: Functional Dependencies & Data Types
@@ -862,6 +918,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         
         print("\n[PASS] Phase 4 completed")
         
+        
         # ========================================================================
         # PHASE 5: DDL & SQL Generation
         # ========================================================================
@@ -1012,6 +1069,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         
         print("\n[PASS] Phase 5 completed")
         
+        
         # ========================================================================
         # PHASE 6: Constraints & Distributions
         # ========================================================================
@@ -1114,6 +1172,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
         print(f"  Constraints compiled: {total_compiled} total")
         
         print("\n[PASS] Phase 6 completed")
+        
         
         # ========================================================================
         # PHASE 7: Generation Strategies
@@ -1340,7 +1399,11 @@ async def test_phases_1_2_3_4_5_6_7_integration(nl_description: str = None, desc
     
     return all_passed
 
-async def test_phases_1_to_5_integration(nl_description: str = None, description_index: int = None):
+async def test_phases_1_to_5_integration(
+    nl_description: str = None,
+    description_index: int = None,
+    log_file_override: str = None,
+):
     """Test Phases 1, 2, 3, 4, 5, 6, and 7 with a single NL description."""
     # Use default description if none provided
     if nl_description is None:
@@ -1351,8 +1414,8 @@ async def test_phases_1_to_5_integration(nl_description: str = None, description
     logger = get_logger(__name__)
     log_config = get_config('logging')
     
-    # Use the same log file for all descriptions
-    log_file = log_config.get('log_file')
+    # Use the same log file for all descriptions, unless overridden by caller
+    log_file = log_file_override or log_config.get('log_file')
     
     setup_logging(
         level=log_config['level'],
@@ -1504,6 +1567,10 @@ async def test_phases_1_to_5_integration(nl_description: str = None, description
         print(f"  Relation validation: {validation_result.get('validation_passed', False)}")
         
         print("\n[PASS] Phase 1 completed")
+
+        if max_phase and max_phase < 2:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 1.")
+            return all_passed
         
         # ========================================================================
         # PHASE 2: Attribute Discovery & Schema Design
@@ -1855,6 +1922,10 @@ async def test_phases_1_to_5_integration(nl_description: str = None, description
         
         print("\n[PASS] Phase 3 completed")
         
+        if max_phase and max_phase < 4:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 3.")
+            return all_passed
+        
         # ========================================================================
         # PHASE 4: Functional Dependencies & Data Types
         # ========================================================================
@@ -2100,6 +2171,10 @@ async def test_phases_1_to_5_integration(nl_description: str = None, description
         
         print("\n[PASS] Phase 4 completed")
         
+        if max_phase and max_phase < 5:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 4.")
+            return all_passed
+        
         # ========================================================================
         # PHASE 5: DDL & SQL Generation
         # ========================================================================
@@ -2257,6 +2332,10 @@ async def test_phases_1_to_5_integration(nl_description: str = None, description
         
         print("\n[PASS] Phase 5 completed")
         
+        if max_phase and max_phase < 6:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 5.")
+            return all_passed
+        
         # ========================================================================
         # PHASE 6: Constraints & Distributions
         # ========================================================================
@@ -2359,6 +2438,10 @@ async def test_phases_1_to_5_integration(nl_description: str = None, description
         print(f"  Constraints compiled: {total_compiled} total")
         
         print("\n[PASS] Phase 6 completed")
+        
+        if max_phase and max_phase < 7:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 6.")
+            return all_passed
         
         # ========================================================================
         # PHASE 7: Generation Strategies

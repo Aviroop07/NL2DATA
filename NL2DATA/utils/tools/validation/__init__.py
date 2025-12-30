@@ -39,6 +39,7 @@ from .feasibility import (
 
 # Naming validation
 from .naming import (
+    _check_entity_name_validity_impl,
     check_entity_name_validity,
     check_attribute_name_validity,
     check_naming_convention,
@@ -47,6 +48,11 @@ from .naming import (
 
 # Evidence / constraint validation
 from .evidence import (
+    _verify_evidence_substring_impl,
+    _verify_entity_in_known_entities_impl,
+    _validate_subset_impl,
+    _validate_merge_decision_impl,
+    _validate_final_entities_impl,
     verify_evidence_substring,
     verify_entity_in_known_entities,
     validate_subset,
@@ -107,11 +113,17 @@ __all__ = [
     "check_generator_exists",
     "check_partition_feasibility",
     # Naming validation
+    "_check_entity_name_validity_impl",
     "check_entity_name_validity",
     "check_attribute_name_validity",
     "check_naming_convention",
     "check_name_reserved",
     # Evidence / constraint validation
+    "_verify_evidence_substring_impl",
+    "_verify_entity_in_known_entities_impl",
+    "_validate_subset_impl",
+    "_validate_merge_decision_impl",
+    "_validate_final_entities_impl",
     "verify_evidence_substring",
     "verify_entity_in_known_entities",
     "validate_subset",

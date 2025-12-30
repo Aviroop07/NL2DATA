@@ -32,7 +32,8 @@ class NL2DataService:
         job_id: str,
         nl_description: str,
         ws_manager: WebSocketManager,
-        job_manager: JobManager
+        job_manager: JobManager,
+        max_phase: int = None
     ):
         """
         Run pipeline and emit WebSocket events for each step.
@@ -72,7 +73,8 @@ class NL2DataService:
             last_state_for_step: IRGenerationState | None = None
             last_phase: int | None = None
 
-            for phase in range(1, 8):
+            max_phase_to_run = max_phase if max_phase else 7
+            for phase in range(1, max_phase_to_run + 1):
                 logger.info("=" * 80)
                 logger.info(f"STREAMING PHASE {phase}")
                 logger.info("=" * 80)

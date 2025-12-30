@@ -19,7 +19,7 @@ from NL2DATA.phases.phase1.utils import (
     build_entity_list_string,
 )
 from NL2DATA.utils.tools.validation_tools import _verify_entities_exist_impl
-from NL2DATA.utils.tools import verify_evidence_substring
+from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
 
 logger = get_logger(__name__)
 
@@ -38,6 +38,7 @@ async def step_1_9_key_relations_extraction(
     nl_description: str,
     domain: Optional[str] = None,
     mentioned_relations: Optional[List[AnyType]] = None,
+    focus_entities: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Step 1.9: Identify all relationships among entities.
@@ -51,6 +52,8 @@ async def step_1_9_key_relations_extraction(
         nl_description: Natural language description of the database requirements
         domain: Optional domain context
         mentioned_relations: Optional list of explicitly mentioned relations from Step 1.5
+        focus_entities: Optional list of entity names that MUST be connected by at least one relation.
+            This is typically produced by Step 1.10 (schema connectivity) as orphan entities.
         
     Returns:
         dict: Relation extraction result with relations list
@@ -158,11 +161,23 @@ Final reminder:
 - No extra keys. No markdown. No code fences."""
     
     # Human prompt template
+    focus_block = ""
+    if focus_entities:
+        # Keep it compact and stable for the LLM.
+        focus_list = [e for e in focus_entities if isinstance(e, str) and e.strip()]
+        if focus_list:
+            focus_block = (
+                "\nOrphan / focus entities that must be connected by relations (from connectivity check):\n"
+                + "\n".join([f"- {e}" for e in focus_list])
+                + "\n"
+            )
+
     human_prompt = """Entities in the schema:
 {entity_list}
 
 Explicit relations from Step 1.5 (JSON, may be empty):
 {explicit_relations}
+{focus_block}
 
 Natural language description:
 {nl_description}
@@ -205,10 +220,10 @@ Natural language description:
                 "entity_list": entity_list_str,
                 "nl_description": nl_description,
                 "explicit_relations": explicit_relations_json,
+                "focus_block": focus_block,
             },
-            tools=[verify_entities_exist_bound, verify_evidence_substring],
-            use_agent_executor=True,  # Use agent executor for tool calls
-            agent_max_iterations=40,  # Increased for complex schemas with many entities
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
         
@@ -237,6 +252,27 @@ Natural language description:
                 missing = [e for e in entities_in_rel if e not in entity_names]
                 logger.warning(f"Skipping relation with unknown entities {missing}: {entities_in_rel}")
                 continue
+
+            # Validation: evidence must be grounded when explicit_in_text
+            if relation.source == "explicit_in_text":
+                ev = (relation.evidence or "").strip()
+                if not ev:
+                    logger.warning(f"Skipping explicit relation with missing evidence: {entities_in_rel}")
+                    continue
+                if not _verify_evidence_substring_impl(ev, nl_description).get("is_substring", False):
+                    # Connectivity-focused extraction often proposes correct relations but fails to provide a
+                    # verbatim evidence substring. Instead of dropping the relation (which breaks graph
+                    # connectivity), conservatively downgrade it to schema_inferred.
+                    logger.warning(
+                        f"Explicit relation evidence not grounded; downgrading to schema_inferred: {entities_in_rel}"
+                    )
+                    relation = relation.model_copy(
+                        update={
+                            "source": "schema_inferred",
+                            "evidence": None,
+                            "confidence": relation.confidence if relation.confidence is not None else 0.5,
+                        }
+                    )
             
             # Fix arity mismatch if needed
             fixed_relation = relation

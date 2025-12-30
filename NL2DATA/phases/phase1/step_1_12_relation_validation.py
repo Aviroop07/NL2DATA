@@ -180,44 +180,71 @@ Relations in the schema (with cardinalities if available):
 Original description (if available):
 {{nl_description}}"""
     
-    # Initialize model
-    llm = get_model_for_step("1.12")  # Step 1.12 maps to "reasoning" task type
-    
-    # Create bound versions of tools with schema_state
-    schema_state = {"entities": entities, "relations": relations}
-    def detect_circular_dependencies_bound(relations_list: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Bound version of detect_circular_dependencies with schema_state."""
-        # NOTE: detect_circular_dependencies is a LangChain @tool (StructuredTool) and is not callable.
-        return _detect_circular_dependencies_impl(relations_list)
-    
-    def validate_cardinality_consistency_bound(relation: Dict[str, Any]) -> Dict[str, Any]:
-        """Bound version of validate_cardinality_consistency with schema_state."""
-        # NOTE: validate_cardinality_consistency is a LangChain @tool (StructuredTool) and is not callable.
-        return _validate_cardinality_consistency_impl(relation)
-    
-    try:
-        logger.debug("Invoking LLM for relation validation")
-        config = get_trace_config("1.12", phase=1, tags=["relation_validation"])
-        result: RelationValidationOutput = await standardized_llm_call(
-            llm=llm,
-            output_schema=RelationValidationOutput,
-            system_prompt=system_prompt,
-            human_prompt_template=human_prompt,
-            input_data={
-                "entity_list": entity_list_str,
-                "relation_list": relation_list_str,
-                "nl_description": nl_description or "",
-            },
-            tools=[detect_circular_dependencies_bound, validate_cardinality_consistency_bound],
-            use_agent_executor=True,  # Use agent executor for tool calls
-            config=config,
+    # Deterministic validation (no agent/tool calling).
+    # This avoids brittle tool-argument schema errors and produces stable validation results.
+    # NOTE: The current cycle detector treats relations as directed edges and will flag cycles
+    # in a general schema graph. Cycles are *normal* in ER-style relationship graphs and are not
+    # inherently invalid in Phase 1 (FK directionality isn't finalized yet).
+    # We therefore compute cycles for informational purposes but do NOT fail validation on them.
+    circular = _detect_circular_dependencies_impl(relations).get("cycles", []) or []
+    circular_patterns = ["->".join([*cycle]) for cycle in circular] if circular else []
+
+    impossible: List[str] = []
+    conflicts: List[str] = []
+
+    # Cardinality consistency checks (only when we have sufficient info)
+    for rel in relations or []:
+        rel_entities = rel.get("entities", []) or []
+        rel_type = rel.get("type", "") or ""
+        cards = rel.get("entity_cardinalities") or {}
+        if rel_type and cards:
+            check = _validate_cardinality_consistency_impl(rel)
+            if not check.get("is_consistent", True):
+                e1 = rel_entities[0] if len(rel_entities) > 0 else "?"
+                e2 = rel_entities[1] if len(rel_entities) > 1 else "?"
+                impossible.append(f"{e1}, {e2}: {', '.join(check.get('errors', []))}")
+
+    # Conflicting relation types between same entity pair
+    pair_to_types: Dict[tuple, set] = {}
+    for rel in relations or []:
+        ents = tuple(sorted(rel.get("entities", []) or []))
+        if len(ents) < 2:
+            continue
+        t = (rel.get("type", "") or "").strip().lower()
+        if not t:
+            continue
+        pair_to_types.setdefault(ents, set()).add(t)
+    for pair, types in pair_to_types.items():
+        if len(types) > 1:
+            e1, e2 = pair[0], pair[1]
+            conflicts.append(f"{e1}, {e2}: conflicting relation types detected: {sorted(list(types))}")
+
+    validation_passed = (len(impossible) == 0 and len(conflicts) == 0)
+    reasoning_lines = [
+        f"Deterministic validation summary:",
+        f"- circular_dependencies (informational only at Phase 1): {len(circular_patterns)}",
+        f"- impossible_cardinalities: {len(impossible)}",
+        f"- conflicts: {len(conflicts)}",
+    ]
+    if circular_patterns:
+        reasoning_lines.append(
+            "Note: Graph cycles are expected in Phase 1 and are not treated as errors (FK direction not finalized)."
         )
-        
-        # Work with Pydantic model directly
-        result_dict = result.model_dump()
-    except Exception as e:
-        logger.error(f"Error in relation validation: {e}", exc_info=True)
-        raise
+    if not validation_passed:
+        if circular_patterns:
+            reasoning_lines.append(f"circular patterns: {circular_patterns}")
+        if impossible:
+            reasoning_lines.append(f"impossible cardinalities: {impossible[:5]}")
+        if conflicts:
+            reasoning_lines.append(f"conflicts: {conflicts[:5]}")
+
+    result_dict = {
+        "circular_dependencies": circular_patterns,
+        "impossible_cardinalities": impossible,
+        "conflicts": conflicts,
+        "validation_passed": validation_passed,
+        "reasoning": "\n".join(reasoning_lines),
+    }
     
     # Work with result_dict for logging (already converted from Pydantic model)
     validation_passed = result_dict.get("validation_passed", False)

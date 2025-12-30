@@ -10,7 +10,7 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
-from NL2DATA.utils.tools import verify_evidence_substring
+from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
 
 logger = get_logger(__name__)
 
@@ -89,13 +89,6 @@ Reasoning constraints
 - <= 25 words.
 - Must reference the evidence (by quoting at least one evidence string if any exist).
 
-Tool usage (mandatory when has_explicit_entities = true)
-You have access to: verify_evidence_substring(evidence: str, nl_description: str) -> {is_substring: bool, error: str|null}
-Before finalizing your response:
-1) For EACH entity in mentioned_entities, call verify_evidence_substring with:
-   {"evidence": "<entity.evidence>", "nl_description": "<full_nl_description>"}
-2) If is_substring = false for any entity, correct the evidence to be an exact substring from nl_description, then re-check.
-
 No extra text. No markdown. No code fences."""
     
     # Human prompt template
@@ -113,9 +106,33 @@ No extra text. No markdown. No code fences."""
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description},
-            tools=[verify_evidence_substring],
-            use_agent_executor=True,
+            tools=None,
+            use_agent_executor=False,
             config=config,
+        )
+
+        # Deterministic grounding enforcement (drop any entity whose evidence is not a verbatim substring)
+        filtered: List[EntityWithEvidence] = []
+        seen_evidence_lower: set[str] = set()
+        for ent in (result.mentioned_entities or []):
+            ev = (ent.evidence or "").strip()
+            if not ev:
+                continue
+            check = _verify_evidence_substring_impl(ev, nl_description)
+            if not check.get("is_substring", False):
+                continue
+            key = ev.lower()
+            if key in seen_evidence_lower:
+                continue
+            seen_evidence_lower.add(key)
+            filtered.append(ent)
+
+        has_any = len(filtered) > 0
+        result = result.model_copy(
+            update={
+                "has_explicit_entities": has_any,
+                "mentioned_entities": filtered,
+            }
         )
         
         # Work with Pydantic model directly

@@ -10,7 +10,7 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
-from NL2DATA.utils.tools import verify_evidence_substring
+from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
 
 logger = get_logger(__name__)
 
@@ -75,13 +75,6 @@ Grounding rule (critical)
 - If has_explicit_domain = true, evidence MUST be the exact substring copied verbatim from the input (preserve casing/spaces).
 - If has_explicit_domain = false, evidence MUST be "" (empty string).
 
-Tool usage (mandatory when has_explicit_domain = true)
-You have access to: verify_evidence_substring(evidence: str, nl_description: str) -> {is_substring: bool, error: str|null}
-Before finalizing your response:
-1) If has_explicit_domain = true, call verify_evidence_substring with:
-   {"evidence": "<your_evidence>", "nl_description": "<full_nl_description>"}
-2) If is_substring = false, correct your evidence to be an exact substring from nl_description, then re-check.
-
 Reasoning constraints
 - Keep reasoning <= 25 words.
 - If has_explicit_domain = true, reasoning MUST quote the exact phrase used for domain (verbatim).
@@ -105,10 +98,27 @@ No extra text. No markdown. No code fences."""
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description},
-            tools=[verify_evidence_substring],
-            use_agent_executor=True,
+            tools=None,
+            use_agent_executor=False,
             config=config,
         )
+
+        # Deterministic grounding enforcement (prevents agent/tool fragility)
+        if result.has_explicit_domain:
+            check = _verify_evidence_substring_impl(result.evidence, nl_description)
+            if not check.get("is_substring", False):
+                result = result.model_copy(
+                    update={
+                        "has_explicit_domain": False,
+                        "domain": "",
+                        "evidence": "",
+                        "reasoning": "No domain was explicitly named.",
+                    }
+                )
+        else:
+            # Ensure evidence/domain are empty when flag is false
+            if result.domain or result.evidence:
+                result = result.model_copy(update={"domain": "", "evidence": ""})
         
         # Work with Pydantic model directly
         logger.info(f"Domain detection completed: has_explicit_domain={result.has_explicit_domain}")

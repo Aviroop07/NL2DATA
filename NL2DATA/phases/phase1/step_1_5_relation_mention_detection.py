@@ -11,7 +11,10 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
-from NL2DATA.utils.tools import verify_evidence_substring, verify_entity_in_known_entities
+from NL2DATA.utils.tools.validation_tools import (
+    _verify_evidence_substring_impl,
+    _verify_entity_in_known_entities_impl,
+)
 
 logger = get_logger(__name__)
 
@@ -146,9 +149,43 @@ KnownEntities: {known_entities}
             system_prompt=system_prompt,
             human_prompt_template=human_prompt,
             input_data={"nl_description": nl_description, "known_entities": known_entities},
-            tools=[verify_evidence_substring, verify_entity_in_known_entities],
-            use_agent_executor=True,
+            tools=None,
+            use_agent_executor=False,
             config=config,
+        )
+
+        # Deterministic enforcement:
+        # - subject/object must be in known_entities
+        # - evidence must be a verbatim substring
+        # - dedupe by (subject, predicate, object, evidence) case-insensitively
+        filtered: List[RelationWithEvidence] = []
+        seen: set[str] = set()
+        for rel in result.relations or []:
+            subj = (rel.subject or "").strip()
+            obj = (rel.object or "").strip()
+            ev = (rel.evidence or "").strip()
+
+            if not subj or not obj or not ev:
+                continue
+
+            if not _verify_entity_in_known_entities_impl(subj, known_entities).get("exists", False):
+                continue
+            if not _verify_entity_in_known_entities_impl(obj, known_entities).get("exists", False):
+                continue
+            if not _verify_evidence_substring_impl(ev, nl_description).get("is_substring", False):
+                continue
+
+            key = "|".join([subj.lower(), (rel.predicate or "").strip().lower(), obj.lower(), ev.lower()])
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(rel)
+
+        result = result.model_copy(
+            update={
+                "has_explicit_relations": len(filtered) > 0,
+                "relations": filtered,
+            }
         )
         
         # Work with Pydantic model directly
