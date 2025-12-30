@@ -1,0 +1,101 @@
+# NL2DATA Configuration File
+# Model names, settings, and other configuration parameters
+
+# OpenAI Configuration
+openai:
+  # Default model (fallback)
+  model: "gpt-4o-mini"
+  temperature: 0  # Zero temperature for maximum consistency and determinism
+  max_tokens: 16000  # Maximum tokens per response (default, can be overridden per task)
+  timeout: 180  # Request timeout in seconds
+  
+  # Max tokens per task type (overrides default max_tokens)
+  max_tokens_per_task:
+    # Simple tasks - shorter responses
+    simple: 4000  # Domain detection, entity mention detection, simple validations
+    # Important tasks - medium responses
+    important: 8000  # Entity extraction, relation extraction, constraint analysis, domain inference
+    # Reasoning tasks - longer responses for complex reasoning
+    reasoning: 12000  # Complex reasoning, entity consolidation, relation validation
+    # Critical reasoning - longest responses for highest-stakes decisions
+    critical_reasoning: 16000  # Entity extraction, relation extraction, cardinality, functional dependencies
+    # Advanced reasoning - long responses
+    advanced_reasoning: 12000  # Schema validation, information need identification, completeness checks
+    # High-fan-out tasks - medium responses (many entities/relations)
+    high_fanout: 8000  # Attribute discovery (many entities), per-entity/per-relation tasks
+    # Validation tasks - shorter responses
+    validation: 4000  # Syntax validation, naming validation
+    # Error correction - longer responses for detailed corrections
+    error_correction: 10000  # DDL error correction, SQL query correction
+  
+  # Model Selection Policy - different models for different task types
+  model_selection:
+    # Simple tasks - cost-effective model
+    simple: "gpt-4o-mini"  # Domain detection, entity mention detection, simple validations
+    
+    # Important tasks - high quality GPT-5 model
+    important: "gpt-5"  # Entity extraction, relation extraction, constraint analysis, domain inference
+    
+    # Reasoning tasks - GPT-5.1 for complex reasoning
+    # Note: Falls back to o3-mini if GPT-5 models unavailable
+    reasoning: "gpt-5.1"  # Complex reasoning, entity consolidation, relation validation
+    
+    # Critical reasoning - most advanced model for highest-stakes decisions
+    # Use gpt-4o for steps where correctness is absolutely critical (foundation steps)
+    # Note: gpt-5.2-pro doesn't exist - using gpt-4o as a reliable high-quality alternative
+    critical_reasoning: "gpt-4o"  # Entity extraction, relation extraction, cardinality, functional dependencies
+    
+    # Advanced reasoning - gpt-5.2 or o3-pro for important but less foundational steps
+    advanced_reasoning: "gpt-5.2"  # Schema validation, information need identification, completeness checks
+    
+    # High-fan-out tasks - balance cost and accuracy
+    high_fanout: "gpt-4o-mini"  # Attribute discovery (many entities), per-entity/per-relation tasks
+    
+    # Validation tasks - fast and accurate
+    validation: "gpt-4o-mini"  # Syntax validation, naming validation
+    
+    # Error correction - high quality needed
+    error_correction: "gpt-4o"  # DDL error correction, SQL query correction
+
+# LangChain Configuration
+langchain:
+  max_retries: 3  # Number of retries for failed LLM calls
+  retry_delay: 1.0  # Initial retry delay in seconds (exponential backoff)
+  enable_streaming: true  # Enable streaming for real-time updates
+  enable_caching: true  # Enable response caching
+
+# Phase Configuration
+phases:
+  max_iterations: 10  # Maximum iterations for iterative refinement loops
+  checkpoint_interval: 1  # Save checkpoint after every N steps
+  
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "detailed"  # "simple" or "detailed"
+  log_to_file: true  # Enable file logging
+  log_file: "logs/nl2data.log"  # Log file path (relative to NL2DATA root)
+
+# Validation Configuration
+validation:
+  strict_mode: true  # Enable strict validation
+  validate_sql: true  # Validate SQL syntax
+  validate_ir: true  # Validate IR structures
+
+# Cost Tracking
+cost_tracking:
+  enabled: true  # Track API costs
+  budget_limit: null  # Optional budget limit (null = no limit)
+
+# Rate Limiting Configuration
+rate_limiting:
+  enabled: true  # Enable rate limiting
+  requests_per_minute: 500  # Maximum requests per minute
+  tokens_per_minute: 1000000  # Maximum tokens per minute (1M)
+  max_concurrent: 10  # Global maximum concurrent requests
+  max_concurrency_per_step_type:
+    per-entity: 5  # Max concurrent per-entity operations
+    per-relation: 3  # Max concurrent per-relation operations
+    per-attribute: 10  # Max concurrent per-attribute operations
+    per-information: 5  # Max concurrent per-information operations
+

@@ -1,0 +1,54 @@
+# ----------------------------
+# Project-specific ignores
+# ----------------------------
+
+# Logs (files + directories)
+*.log
+*.log.*
+**/logs/
+**/logs/**
+
+# Markdown (user request: do not push any .md files)
+*.md
+
+
+# ----------------------------
+# Python
+# ----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+coverage.xml
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+.env
+.env.*
+
+
+# ----------------------------
+# Node / Frontend
+# ----------------------------
+**/node_modules/
+**/dist/
+**/build/
+
+
+# ----------------------------
+# OS / Editor
+# ----------------------------
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+

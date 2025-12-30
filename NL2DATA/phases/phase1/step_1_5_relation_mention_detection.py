@@ -1,0 +1,165 @@
+"""Phase 1, Step 1.5: Relation Mention Detection.
+
+Checks if relationships between entities are explicitly mentioned in the description.
+"""
+
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
+
+from NL2DATA.phases.phase1.model_router import get_model_for_step
+from NL2DATA.utils.llm import standardized_llm_call
+from NL2DATA.utils.observability import traceable_step, get_trace_config
+from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.tools import verify_evidence_substring, verify_entity_in_known_entities
+
+logger = get_logger(__name__)
+
+
+class RelationWithEvidence(BaseModel):
+    subject: str = Field(description="Canonical entity name (from KnownEntities)")
+    predicate: str = Field(description="Relationship verb/phrase (e.g., deployed_in, experiences, resets)")
+    object: str = Field(description="Canonical entity name (from KnownEntities)")
+    evidence: str = Field(description="Verbatim evidence snippet (<= 30 words) copied from description")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RelationMentionOutput(BaseModel):
+    """Output structure for relation mention detection."""
+    has_explicit_relations: bool = Field(description="Whether relationships are explicitly mentioned in the description")
+    relations: List[RelationWithEvidence] = Field(
+        default_factory=list,
+        description="List of explicitly stated relations with evidence"
+    )
+    reasoning: str = Field(description="Reasoning (<= 25 words) referencing evidence")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@traceable_step("1.5", phase=1, tags=["relation_mention_detection"])
+async def step_1_5_relation_mention_detection(
+    nl_description: str,
+    entities: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Step 1.5: Check if relationships between entities are explicitly mentioned.
+    
+    This step helps identify which relations are user-specified vs. need inference.
+    
+    Args:
+        nl_description: Natural language description of the database requirements
+        entities: Optional list of entities from Step 1.4 for context
+        
+    Returns:
+        dict: Relation mention detection result with has_explicit_relations and mentioned_relations
+        
+    Example:
+        >>> result = await step_1_5_relation_mention_detection(
+        ...     "Customers place orders. Orders contain products."
+        ... )
+        >>> result["has_explicit_relations"]
+        True
+        >>> result["mentioned_relations"]
+        ["Customers place orders", "Orders contain products"]
+    """
+    logger.info("Starting Step 1.5: Relation Mention Detection")
+    logger.debug(f"Input description length: {len(nl_description)} characters")
+    
+    known_entities: List[str] = []
+    if entities:
+        for e in entities:
+            if isinstance(e, dict):
+                n = (e.get("name") or "").strip()
+            else:
+                n = (getattr(e, "name", "") or "").strip()
+            if n:
+                known_entities.append(n)
+    
+    system_prompt = """You are an information extraction engine.
+
+Task: Extract ONLY relationships that are explicitly stated in the natural-language description between the provided entities.
+
+Definition: A relationship is "explicit" ONLY if the description contains a direct relationship phrase/verb connecting two entities (e.g., "X deployed across Y", "Y experiences X", "events reset X").
+Do NOT infer relationships based on typical database design, star schemas, or domain knowledge.
+Do NOT invent relationships such as foreign keys unless the description explicitly states them.
+
+Inputs you will receive:
+- Natural language description
+- KnownEntities: a list of canonical entity names you must use
+
+Rules:
+- Each relation must reference entities from KnownEntities (no new entity names).
+- Each relation must include a short verbatim evidence snippet copied from the description.
+- If you cannot find any explicit relations, return has_explicit_relations=false and an empty relations list.
+
+Hard constraint reminder:
+"Only output relations with direct evidence spans. Do not infer star-schema joins."
+
+Tool usage (mandatory when has_explicit_relations = true)
+You have access to two tools:
+1) verify_evidence_substring(evidence: str, nl_description: str) -> {is_substring: bool, error: str|null}
+2) verify_entity_in_known_entities(entity: str, known_entities: List[str]) -> {exists: bool, error: str|null}
+
+Before finalizing your response:
+1) For EACH relation in relations:
+   a) Call verify_entity_in_known_entities for BOTH subject and object:
+      {"entity": "<relation.subject>", "known_entities": [<KnownEntities_list>]}
+      {"entity": "<relation.object>", "known_entities": [<KnownEntities_list>]}
+   b) If exists = false for either subject or object, correct the entity name to match one from KnownEntities, then re-check.
+2) For EACH relation, call verify_evidence_substring with:
+   {"evidence": "<relation.evidence>", "nl_description": "<full_nl_description>"}
+3) If is_substring = false for any relation, correct the evidence to be an exact substring from nl_description, then re-check.
+
+Output: Return a single JSON object with exactly:
+{
+  "has_explicit_relations": boolean,
+  "relations": [
+    {
+      "subject": string,
+      "predicate": string,
+      "object": string,
+      "evidence": string
+    }
+  ],
+  "reasoning": string
+}
+
+No extra text. No markdown. No code fences."""
+    
+    # Human prompt template
+    human_prompt = """Natural language description:
+{nl_description}
+
+KnownEntities: {known_entities}
+"""
+    
+    # Initialize model
+    llm = get_model_for_step("1.5")  # Step 1.5 maps to "simple" task type
+    
+    try:
+        logger.debug("Invoking LLM for relation mention detection")
+        config = get_trace_config("1.5", phase=1, tags=["relation_mention_detection"])
+        result: RelationMentionOutput = await standardized_llm_call(
+            llm=llm,
+            output_schema=RelationMentionOutput,
+            system_prompt=system_prompt,
+            human_prompt_template=human_prompt,
+            input_data={"nl_description": nl_description, "known_entities": known_entities},
+            tools=[verify_evidence_substring, verify_entity_in_known_entities],
+            use_agent_executor=True,
+            config=config,
+        )
+        
+        # Work with Pydantic model directly
+        logger.info(f"Relation mention detection completed: has_explicit_relations={result.has_explicit_relations}")
+        if result.relations:
+            logger.info(f"Found {len(result.relations)} explicitly mentioned relations")
+        
+        # Convert to dict only at return boundary
+        return result.model_dump()
+        
+    except Exception as e:
+        logger.error(f"Error in relation mention detection: {e}", exc_info=True)
+        raise
+
