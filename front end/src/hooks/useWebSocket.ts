@@ -60,7 +60,7 @@ export const useWebSocket = (jobId: string | null) => {
               step: data.step,
               step_name: data.step_name,
               scope: data.scope,
-              message: `✅ ${data.message}`,
+              message: `OK: ${data.message}`,
               level: 'info' as const,
               summary: data.summary
             };

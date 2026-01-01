@@ -98,7 +98,7 @@ Determine the enforcement strategy and create a DSL expression for this constrai
         
         IMPORTANT: When calling this tool, provide arguments as a JSON object:
         {"dsl": "amount > 0"}
-        NOT as a list: ["dsl"] ❌
+        NOT as a list: ["dsl"] (WRONG)
         """
         # Use the pure implementation (grammar is optional and not used in current implementation)
         return _validate_dsl_expression_impl(dsl, grammar=dsl_grammar)

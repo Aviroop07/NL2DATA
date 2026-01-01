@@ -186,21 +186,45 @@ def _validate_cardinality_consistency_impl(relation: Dict[str, Any]) -> Dict[str
         if entity not in cardinalities:
             errors.append(f"Entity '{entity}' missing cardinality")
 
-    if "one-to-many" in rel_type or "1:n" in rel_type or "1-n" in rel_type:
-        ones = [e for e, c in cardinalities.items() if c == "1"]
-        ns = [e for e, c in cardinalities.items() if c == "N"]
-        if len(ones) != 1 or len(ns) != 1:
-            errors.append(
-                f"One-to-many relation should have exactly one '1' and one 'N', got {len(ones)} ones and {len(ns)} Ns"
-            )
-    elif "many-to-many" in rel_type or "n:m" in rel_type or "n-n" in rel_type:
-        ns = [e for e, c in cardinalities.items() if c == "N"]
-        if len(ns) < 2:
-            errors.append(f"Many-to-many relation should have at least two 'N' cardinalities, got {len(ns)}")
-    elif "one-to-one" in rel_type or "1:1" in rel_type:
-        ones = [e for e, c in cardinalities.items() if c == "1"]
-        if len(ones) != 2:
-            errors.append(f"One-to-one relation should have exactly two '1' cardinalities, got {len(ones)}")
+    # Phase-1 deterministic consistency rules.
+    #
+    # IMPORTANT:
+    # The pipeline does NOT currently encode a stable directional ordering for `entities`.
+    # Therefore, checks for one-to-many / many-to-one are **order-independent** and validated
+    # based on the per-entity cardinalities ("1"/"N").
+    rel_type_norm = rel_type.strip().replace("_", "-")
+
+    if rel_type_norm in {"one-to-one", "1:1", "1-1"}:
+        if len(entities) != 2:
+            errors.append(f"one-to-one relation must be binary (arity=2), got arity={len(entities)}")
+        else:
+            e1, e2 = entities[0], entities[1]
+            if cardinalities.get(e1) != "1" or cardinalities.get(e2) != "1":
+                errors.append(
+                    f"one-to-one requires both cardinalities to be '1' (got {e1}={cardinalities.get(e1)}, {e2}={cardinalities.get(e2)})"
+                )
+    elif rel_type_norm in {"one-to-many", "many-to-one", "1:n", "1-n", "n:1", "n-1"}:
+        if len(entities) != 2:
+            errors.append(f"{rel_type_norm} relation must be binary (arity=2), got arity={len(entities)}")
+        else:
+            ones = [e for e in entities if cardinalities.get(e) == "1"]
+            ns = [e for e in entities if cardinalities.get(e) == "N"]
+            if len(ones) != 1 or len(ns) != 1:
+                errors.append(
+                    f"{rel_type_norm} requires exactly one '1' and one 'N' (got ones={ones}, Ns={ns})"
+                )
+    elif rel_type_norm in {"many-to-many", "n:m", "n-m", "n-n"}:
+        if len(entities) != 2:
+            errors.append(f"many-to-many relation must be binary (arity=2), got arity={len(entities)}")
+        else:
+            e1, e2 = entities[0], entities[1]
+            if cardinalities.get(e1) != "N" or cardinalities.get(e2) != "N":
+                errors.append(
+                    f"many-to-many requires both cardinalities to be 'N' (got {e1}={cardinalities.get(e1)}, {e2}={cardinalities.get(e2)})"
+                )
+    elif rel_type_norm == "ternary":
+        if len(entities) < 3:
+            errors.append(f"ternary relation must have arity>=3, got arity={len(entities)}")
 
     is_consistent = len(errors) == 0
     return {

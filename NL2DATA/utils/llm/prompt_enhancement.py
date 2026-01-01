@@ -30,10 +30,10 @@ def enhance_system_prompt(system_prompt: str, tools: Optional[List[Any]] = None)
         tool_examples += "- Tool with 'sql' parameter: {{\"sql\": \"SELECT * FROM Customer;\"}}\n"
         tool_examples += "- Tool with 'component_type' and 'name': {{\"component_type\": \"table\", \"name\": \"Customer\"}}\n\n"
         tool_examples += "WRONG FORMAT (what you MUST NOT do):\n"
-        tool_examples += "- ❌ [\"entities\"] - This is a list, NOT a dictionary\n"
-        tool_examples += "- ❌ [] - Empty list, NOT a dictionary\n"
-        tool_examples += "- ❌ [\"component_type\", \"name\"] - List of parameter names, NOT a dictionary\n"
-        tool_examples += "- ❌ \"entities\" - String, NOT a dictionary\n\n"
+        tool_examples += "- [WRONG] [\"entities\"] - This is a list, NOT a dictionary\n"
+        tool_examples += "- [WRONG] [] - Empty list, NOT a dictionary\n"
+        tool_examples += "- [WRONG] [\"component_type\", \"name\"] - List of parameter names, NOT a dictionary\n"
+        tool_examples += "- [WRONG] \"entities\" - String, NOT a dictionary\n\n"
         tool_examples += "REMEMBER: Tool arguments MUST be a JSON object with key-value pairs where:\n"
         tool_examples += "- Keys are the parameter names (exactly as specified in the tool description)\n"
         tool_examples += "- Values are the actual argument values\n"
@@ -46,11 +46,11 @@ CRITICAL OUTPUT REQUIREMENTS:
    - Example: If tool requires "entities", call with {{"entities": ["Entity1", "Entity2"]}}
    - Example: If tool requires "sql", call with {{"sql": "SELECT * FROM table;"}}
    - Example: If tool requires "component_type" and "name", call with {{"component_type": "table", "name": "Customer"}}
-   - DO NOT provide arguments as a list: ["entities"] ❌
-   - DO NOT provide arguments as an empty list: [] ❌
-   - DO NOT provide arguments as a list of parameter names: ["component_type", "name"] ❌
+   - DO NOT provide arguments as a list: ["entities"] (WRONG)
+   - DO NOT provide arguments as an empty list: [] (WRONG)
+   - DO NOT provide arguments as a list of parameter names: ["component_type", "name"] (WRONG)
    - DO NOT omit required parameters or use incorrect parameter names
-   - ALWAYS use a dictionary/object format: {{"parameter_name": value}} ✅
+   - ALWAYS use a dictionary/object format: {{"parameter_name": value}} (CORRECT)
 {tool_examples}
 3. **CRITICAL: When you see a tool error message**:
    - The error message is FEEDBACK to help you correct your tool call

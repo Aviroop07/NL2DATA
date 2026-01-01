@@ -14,6 +14,7 @@ from .validators import (
     validate_primary_keys_exist,
     validate_foreign_keys_reference_existing_pks,
     validate_derived_dependencies_exist,
+    validate_derived_formula_dependencies_match_formula,
     validate_data_types_valid,
     validate_ddl_parses,
     validate_constraints_satisfiable,
@@ -96,6 +97,8 @@ def check_phase_2_gate(state: Dict[str, Any]) -> GateResult:
     
     # Check derived attribute dependencies
     issues.extend(validate_derived_dependencies_exist(attributes, derived_formulas))
+    # Check derived formula dependency list matches formula identifiers and is entity-local
+    issues.extend(validate_derived_formula_dependencies_match_formula(attributes, derived_formulas))
     
     passed = len(issues) == 0
     

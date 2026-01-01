@@ -1,4 +1,4 @@
-"""Phase 2, Step 2.9: Derived Attribute Formulas.
+"""Phase 2, Step 2.9: Derived Attribute Formulas (DSL).
 
 Extracts the computation logic for derived attributes.
 Needed for data generation - derived columns are computed, not sampled.
@@ -11,6 +11,10 @@ from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase2_config
+from NL2DATA.utils.dsl.validator import validate_dsl_expression
+from NL2DATA.utils.dsl.analysis import dsl_identifiers_used, dsl_contains_aggregate
+from NL2DATA.utils.dsl.prompt_spec import dsl_prompt_spec_text
 
 logger = get_logger(__name__)
 
@@ -18,7 +22,7 @@ logger = get_logger(__name__)
 class DerivedFormulaOutput(BaseModel):
     """Output structure for derived attribute formula extraction."""
     formula: str = Field(
-        description="The computation formula/expression for the derived attribute (e.g., 'quantity * unit_price', 'CONCAT(first_name, \" \", last_name)')"
+        description="The computation expression for the derived attribute in NL2DATA DSL (strict allowlist; no unknown functions)."
     )
     expression_type: str = Field(
         description="Type of expression: 'arithmetic', 'string_concatenation', 'conditional', 'date_calculation', 'aggregation', 'other'"
@@ -29,34 +33,6 @@ class DerivedFormulaOutput(BaseModel):
     reasoning: str = Field(description="Explanation of the derivation logic and why this formula is correct")
 
 
-def _validate_formula_syntax(formula: str) -> tuple[bool, Optional[str]]:
-    """
-    Basic validation of formula syntax.
-    
-    Checks:
-    - Balanced parentheses
-    - Valid operators (basic check)
-    
-    Returns:
-        (is_valid, error_message)
-    """
-    if not formula or not formula.strip():
-        return False, "Formula cannot be empty"
-    
-    # Check balanced parentheses
-    paren_count = 0
-    for char in formula:
-        if char == '(':
-            paren_count += 1
-        elif char == ')':
-            paren_count -= 1
-            if paren_count < 0:
-                return False, "Unbalanced parentheses: closing ')' before opening '('"
-    
-    if paren_count != 0:
-        return False, f"Unbalanced parentheses: {paren_count} unclosed opening '('"
-    
-    return True, None
 
 
 @traceable_step("2.9", phase=2, tags=['phase_2_step_9'])
@@ -118,28 +94,32 @@ async def step_2_9_derived_attribute_formula(
         context_parts.append(f"Derivation rule hint: {derivation_rule}")
     
     context_msg = "\n\nContext:\n" + "\n".join(f"- {part}" for part in context_parts)
+    dsl_spec = dsl_prompt_spec_text(include_examples=True)
     
     # System prompt
-    system_prompt = """You are a database schema design expert. Your task is to extract the computation formula for a derived attribute.
+    system_prompt = """You are a database schema design expert. Your task is to extract the computation expression for a derived attribute.
 
 A derived attribute is computed from other attributes, not stored directly. Examples:
 - total_price = quantity * unit_price (arithmetic)
 - full_name = CONCAT(first_name, " ", last_name) (string concatenation)
 - age = YEAR(CURRENT_DATE) - YEAR(birth_date) (date calculation)
 - is_eligible = IF (age >= 18 AND status = 'active') THEN true ELSE false (conditional)
-- average_score = AVG(scores) (aggregation)
+- total_orders = COUNT(order_id) (aggregation / metric)
 
-The formula should:
-1. Reference only attributes that exist in the entity
-2. Use standard SQL-like syntax or mathematical expressions
-3. Be clear and unambiguous
-4. Include all necessary dependencies
+IMPORTANT (strict):
+- Output `formula` MUST be a valid NL2DATA DSL expression (not free-form SQL).
+- Do NOT invent functions. Only use supported functions (basic math ops, IF/CASE, and allowlisted functions like CONCAT/COALESCE/DATEADD/DATEDIFF/COUNT/SUM/AVG/MIN/MAX etc).
+- Do NOT qualify column names with dots here. Use ONLY bare attribute names from the provided attribute list.
+- The formula must reference ONLY attributes that exist in this entity.
+- `dependencies` must list ONLY attributes used by the formula (subset of the provided list).
 
 Return a JSON object with:
 - formula: The computation expression
 - expression_type: Type of expression (arithmetic, string_concatenation, conditional, date_calculation, aggregation, other)
 - dependencies: List of attribute names this formula depends on
 - reasoning: REQUIRED - Explanation of the derivation logic (cannot be omitted)"""
+    # Put DSL spec in the SYSTEM message (user request) so it is always authoritative.
+    system_prompt = system_prompt + "\n\n" + dsl_spec
     
     # Human prompt
     human_prompt_template = """Extract the computation formula for the derived attribute: {entity_name}.{derived_attribute}
@@ -152,59 +132,98 @@ Natural Language Description:
 Return a JSON object with the formula, expression type, dependencies, and reasoning."""
     
     try:
-        # Get model for this step
+        cfg = get_phase2_config()
         llm = get_model_for_step("2.9")
-        
-        # Invoke standardized LLM call
         config = get_trace_config("2.9", phase=2, tags=["phase_2_step_9"])
-        result: DerivedFormulaOutput = await standardized_llm_call(
-            llm=llm,
-            output_schema=DerivedFormulaOutput,
-            system_prompt=system_prompt,
-            human_prompt_template=human_prompt_template,
-            input_data={
-                "entity_name": entity_name,
-                "derived_attribute": derived_attribute,
-                "context": context_msg,
-                "nl_description": nl_description or "",
-            },
-            config=config,
-        )
-        
-        # Work with Pydantic model directly
-        # Validate formula syntax
-        formula = result.formula
-        is_valid, error_msg = _validate_formula_syntax(formula)
-        if not is_valid:
-            logger.warning(
-                f"Entity {entity_name}, attribute {derived_attribute}: Formula syntax validation failed: {error_msg}"
+
+        feedback: str = ""
+        last: Optional[DerivedFormulaOutput] = None
+
+        for round_idx in range(cfg.step_2_9_max_revision_rounds + 1):
+            prompt = human_prompt_template
+            if feedback:
+                prompt = (
+                    human_prompt_template
+                    + "\n\nRevision required. Fix the issues below and return corrected JSON only.\n"
+                    + "Issues:\n"
+                    + feedback
+                )
+
+            result: DerivedFormulaOutput = await standardized_llm_call(
+                llm=llm,
+                output_schema=DerivedFormulaOutput,
+                system_prompt=system_prompt,
+                human_prompt_template=prompt,
+                input_data={
+                    "entity_name": entity_name,
+                    "derived_attribute": derived_attribute,
+                    "context": context_msg,
+                    "nl_description": nl_description or "",
+                },
+                config=config,
             )
-            # Don't fail, but log the warning
-        
-        # Validate that dependencies exist
-        dependencies = result.dependencies
-        invalid_deps = [dep for dep in dependencies if dep not in all_attributes]
-        if invalid_deps:
-            logger.warning(
-                f"Entity {entity_name}, attribute {derived_attribute}: Dependencies {invalid_deps} don't exist in attribute list"
-            )
-            # Remove invalid dependencies - create new model instance
-            dependencies = [dep for dep in dependencies if dep in all_attributes]
-            result = DerivedFormulaOutput(
-                formula=result.formula,
-                expression_type=result.expression_type,
-                dependencies=dependencies,
-                reasoning=result.reasoning
-            )
-        
-        logger.debug(
-            f"Entity {entity_name}, attribute {derived_attribute}: Formula extracted: {formula}, "
-            f"dependencies: {result.dependencies}"
-        )
-        
-        # Convert to dict only at return boundary
-        return result.model_dump()
-        
+            last = result
+
+            issues: List[str] = []
+            formula = (result.formula or "").strip()
+            if not formula:
+                issues.append("formula is empty")
+            else:
+                v = validate_dsl_expression(formula)
+                if not v.get("valid", False):
+                    issues.append(f"formula is not valid NL2DATA DSL: {v.get('error')}")
+
+                used = dsl_identifiers_used(formula)
+                dotted = sorted([u for u in used if "." in u])
+                if dotted:
+                    issues.append(f"formula uses dotted identifiers (not allowed here): {dotted}")
+
+                # enforce only entity attributes referenced
+                used_bare = sorted([u for u in used if u and "." not in u])
+                unknown_used = [u for u in used_bare if u not in all_attributes]
+                if unknown_used:
+                    issues.append(
+                        f"formula references unknown attributes (must be from list): {unknown_used}. "
+                        f"Allowed: {all_attributes}"
+                    )
+
+            deps = [d for d in (result.dependencies or []) if isinstance(d, str) and d]
+            invalid_deps = [d for d in deps if d not in all_attributes]
+            if invalid_deps:
+                issues.append(f"dependencies contains attributes not in entity attribute list: {invalid_deps}")
+
+            # ensure deps cover used identifiers (best-effort)
+            if formula:
+                used = dsl_identifiers_used(formula)
+                used_bare = {u for u in used if u and "." not in u}
+                missing_deps = sorted([u for u in used_bare if u in all_attributes and u not in set(deps)])
+                extra_deps = sorted([d for d in deps if d not in used_bare])
+                if missing_deps:
+                    issues.append(f"dependencies is missing attributes used in formula: {missing_deps}")
+                if extra_deps:
+                    issues.append(f"dependencies contains attributes not used in formula: {extra_deps}")
+
+            if not issues:
+                out = result.model_dump()
+                out["is_aggregate_metric"] = dsl_contains_aggregate(formula) or (
+                    (result.expression_type or "").strip().lower() == "aggregation"
+                )
+                return out
+
+            if round_idx >= cfg.step_2_9_max_revision_rounds:
+                # Return last result with warning-like info; caller can decide what to do.
+                out = result.model_dump()
+                out["is_aggregate_metric"] = dsl_contains_aggregate(formula) or (
+                    (result.expression_type or "").strip().lower() == "aggregation"
+                )
+                out["validation_errors"] = issues
+                return out
+
+            feedback = "\n".join(f"- {x}" for x in issues)
+
+        # Should never happen
+        return (last.model_dump() if last else {"formula": "", "expression_type": "other", "dependencies": [], "reasoning": ""})
+
     except Exception as e:
         logger.error(
             f"Error extracting formula for derived attribute {entity_name}.{derived_attribute}: {e}",
@@ -282,9 +301,12 @@ async def step_2_9_derived_attribute_formulas_batch(
     
     # Process results - organize by entity, then by attribute
     entity_results = {}
+    entity_metrics: Dict[str, Dict[str, Any]] = {}
     for i, ((entity_name, derived_attr, _), result) in enumerate(zip(tasks, results)):
         if entity_name not in entity_results:
             entity_results[entity_name] = {}
+        if entity_name not in entity_metrics:
+            entity_metrics[entity_name] = {}
         
         if isinstance(result, Exception):
             logger.error(f"Error processing {entity_name}.{derived_attr}: {result}")
@@ -292,10 +314,18 @@ async def step_2_9_derived_attribute_formulas_batch(
                 "formula": "",
                 "expression_type": "other",
                 "dependencies": [],
-                "reasoning": f"Error during analysis: {str(result)}"
+                "reasoning": f"Error during analysis: {str(result)}",
+                "is_aggregate_metric": False,
             }
         else:
+            # If flagged as aggregate metric, store separately too (do not discard).
+            try:
+                is_metric = bool(result.get("is_aggregate_metric", False)) if isinstance(result, dict) else False
+            except Exception:
+                is_metric = False
             entity_results[entity_name][derived_attr] = result
+            if is_metric:
+                entity_metrics[entity_name][derived_attr] = result
     
     total_formulas = sum(len(attrs) for attrs in entity_results.values())
     logger.info(
@@ -303,5 +333,7 @@ async def step_2_9_derived_attribute_formulas_batch(
         f"across {len(entity_results)} entities"
     )
     
-    return {"entity_results": entity_results}
+    # Keep both: entity_results (all), and entity_metrics (aggregate/query-level derived).
+    # Callers that only want row-level derived attributes can filter by is_aggregate_metric == False.
+    return {"entity_results": entity_results, "entity_metrics": entity_metrics}
 

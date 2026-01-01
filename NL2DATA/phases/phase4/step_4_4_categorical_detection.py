@@ -11,6 +11,8 @@ from NL2DATA.phases.phase4.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase4_config
+from NL2DATA.utils.pipeline_config import get_phase4_config
 from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_attribute_name,
     extract_attribute_description,
@@ -70,6 +72,7 @@ async def step_4_4_categorical_detection(
         True
     """
     logger.debug(f"Detecting categorical attributes for entity: {entity_name}")
+    cfg = get_phase4_config()
     
     # Validate that attributes exist
     if not attributes:
@@ -169,15 +172,17 @@ Return a JSON object with:
 
 {context}
 
-Natural Language Description:
-{nl_description}
+Return a JSON object identifying which attributes are categorical, along with reasoning for each.
 
-Return a JSON object identifying which attributes are categorical, along with reasoning for each."""
+IMPORTANT:
+- Do NOT use the original NL description to guess categories for foreign keys / *_id columns.
+- IDs are not categorical unless they are explicitly defined as a small enum-like code column."""
 
     # Initialize model and create chain
     llm = get_model_for_step("4.4")  # Step 4.4 maps to "high_fanout" task type
     
     try:
+        cfg = get_phase4_config()
         config = get_trace_config("4.4", phase=4, tags=["phase_4_step_4"])
         result: CategoricalDetectionOutput = await standardized_llm_call(
             llm=llm,
@@ -187,7 +192,6 @@ Return a JSON object identifying which attributes are categorical, along with re
             input_data={
                 "entity_name": entity_name,
                 "context": context_msg,
-                "nl_description": nl_description or "",
             },
             config=config,
         )
@@ -199,6 +203,17 @@ Return a JSON object identifying which attributes are categorical, along with re
         # Fix: Handle None case for reasoning
         if reasoning is None:
             reasoning = {}
+
+        # Deterministic guardrail:
+        # Treat *_id columns as NOT categorical by default to avoid invalid CHECK constraints.
+        removed_ids = [a for a in categorical_attrs if isinstance(a, str) and a.lower().endswith("_id")]
+        if removed_ids:
+            categorical_attrs = [a for a in categorical_attrs if a not in removed_ids]
+            reasoning = {k: v for k, v in reasoning.items() if k in set(categorical_attrs)}
+            result = CategoricalDetectionOutput(
+                categorical_attributes=categorical_attrs,
+                reasoning=reasoning,
+            )
         missing_reasoning = [attr for attr in categorical_attrs if attr not in reasoning]
         if missing_reasoning:
             logger.warning(
@@ -213,6 +228,35 @@ Return a JSON object identifying which attributes are categorical, along with re
             result = CategoricalDetectionOutput(
                 categorical_attributes=result.categorical_attributes,
                 reasoning=updated_reasoning
+            )
+
+        # Deterministic guardrail: do NOT allow numeric *_id columns to be marked categorical.
+        # This prevents invalid CHECK constraints like BIGINT IN ('state', 'province', ...).
+        filtered_attrs: List[str] = []
+        filtered_reasoning: Dict[str, str] = dict(result.reasoning or {})
+        for a in (result.categorical_attributes or []):
+            a_str = (a or "").strip()
+            if not a_str:
+                continue
+            if a_str.lower().endswith("_id"):
+                type_data = (attribute_types or {}).get(a_str, {}) if attribute_types else {}
+                sql_type = (type_data.get("type", "") or "").upper()
+                hint = ""
+                # fall back to type hint if available
+                for attr in attributes:
+                    if extract_attribute_name(attr) == a_str:
+                        hint = (extract_attribute_type_hint(attr) or "").lower()
+                        break
+                is_numeric_id = sql_type in {"INT", "INTEGER", "BIGINT", "SMALLINT"} or "int" in hint or "integer" in hint
+                if is_numeric_id:
+                    filtered_reasoning.pop(a_str, None)
+                    continue
+            filtered_attrs.append(a_str)
+
+        if filtered_attrs != (result.categorical_attributes or []):
+            result = CategoricalDetectionOutput(
+                categorical_attributes=filtered_attrs,
+                reasoning={k: v for k, v in filtered_reasoning.items() if k in set(filtered_attrs)},
             )
         
         logger.info(

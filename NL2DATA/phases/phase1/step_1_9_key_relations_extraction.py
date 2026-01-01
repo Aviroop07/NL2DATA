@@ -6,6 +6,7 @@ Critical for foreign key design and understanding data flow.
 
 import json
 from typing import Dict, Any, List, Optional, Any as AnyType
+import re
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
@@ -20,8 +21,47 @@ from NL2DATA.phases.phase1.utils import (
 )
 from NL2DATA.utils.tools.validation_tools import _verify_entities_exist_impl
 from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
+from NL2DATA.ir.models.relation_type import RelationType, normalize_relation_type
 
 logger = get_logger(__name__)
+
+def _entity_name_variants_for_text(entity_name: str) -> List[str]:
+    """
+    Lightweight variants so evidence checks can match entity mentions in prose.
+    Example: "CustomerOrder" -> ["customerorder", "customer order", "customer_order", "customer orders", ...]
+    """
+    name = (entity_name or "").strip()
+    if not name:
+        return []
+    spaced = re.sub(r"(?<!^)([A-Z])", r" \1", name).strip().lower()
+    snake = re.sub(r"(?<!^)([A-Z])", r"_\1", name).strip().lower()
+    base = {name.lower(), spaced, snake}
+    out: set[str] = set()
+    for v in base:
+        v = v.strip()
+        if not v:
+            continue
+        out.add(v)
+        if not v.endswith("s"):
+            out.add(v + "s")
+    return sorted(out)
+
+
+def _evidence_mentions_all_entities(evidence: str, entities_in_rel: List[str]) -> bool:
+    """
+    Return True iff the evidence snippet likely mentions all participating entities,
+    using simple variant matching (case-insensitive).
+    """
+    ev = (evidence or "").strip().lower()
+    if not ev:
+        return False
+    for ent in (entities_in_rel or []):
+        variants = _entity_name_variants_for_text(str(ent))
+        if not variants:
+            return False
+        if not any(v in ev for v in variants):
+            return False
+    return True
 
 
 class RelationExtractionOutput(BaseModel):
@@ -99,9 +139,18 @@ A relationship connects two or more entities and describes how they relate to ea
 - **Ternary or N-ary**: Between three or more entities (e.g., Student enrolls in Course taught by Instructor)
 
 Relationship types include:
-- **One-to-Many (1:N)**: One entity instance relates to many instances of another (e.g., Customer has many Orders)
-- **Many-to-Many (N:M)**: Many instances of one entity relate to many instances of another (e.g., Student enrolls in many Courses, Course has many Students)
 - **One-to-One (1:1)**: One entity instance relates to exactly one instance of another (e.g., User has one Profile)
+- **One-to-Many (1:N)**: One instance of one entity relates to many instances of another (e.g., Customer has many Orders)
+- **Many-to-One (N:1)**: Many instances of one entity relate to a single shared instance of another (e.g., many Customers can share one Address)
+- **Many-to-Many (N:M)**: Many instances of each relate to many instances of the other
+- **Ternary (3-ary / n-ary)**: A relationship involving 3 (or more) entities
+
+CRITICAL: Relation `type` MUST be one of these exact enum strings (no other values allowed):
+- "one-to-one"
+- "one-to-many"
+- "many-to-one"
+- "many-to-many"
+- "ternary"
 
 For each relation item:
 - entities: List of canonical entity names involved (MUST have at least 2 unique entities; NO self-relations)
@@ -125,8 +174,8 @@ You have access to two tools:
 1) verify_entities_exist_bound(entities: List[str]) -> Dict[str, bool]
    - Use this to verify that all entities mentioned in relationships exist in the schema
    - CRITICAL: Provide arguments as a JSON object: {{"entities": ["Customer", "Order"]}}
-   - NOT as a list: ["entities"] ❌
-   - NOT as a string: "entities" ❌
+   - NOT as a list: ["entities"] (WRONG)
+   - NOT as a string: "entities" (WRONG)
 2) verify_evidence_substring(evidence: str, nl_description: str) -> {{is_substring: bool, error: str|null}}
    - Use this to validate evidence when source="explicit_in_text"
 
@@ -200,9 +249,9 @@ Natural language description:
         
         IMPORTANT: When calling this tool, provide arguments as a JSON object:
         {"entities": ["Customer", "Order"]}
-        NOT as a list: ["entities"] ❌
-        NOT as a string: "entities" ❌
-        But as a dict: {"entities": ["Customer", "Order"]} ✅
+        NOT as a list: ["entities"] (WRONG)
+        NOT as a string: "entities" (WRONG)
+        But as a dict: {"entities": ["Customer", "Order"]} (CORRECT)
         """
         # NOTE: verify_entities_exist is a LangChain @tool (StructuredTool) and is not callable like a function.
         # Use the pure implementation to avoid "'StructuredTool' object is not callable".
@@ -273,6 +322,21 @@ Natural language description:
                             "confidence": relation.confidence if relation.confidence is not None else 0.5,
                         }
                     )
+                else:
+                    # Additional grounding: evidence must mention ALL participating entities (by name variant).
+                    # If not, downgrade to schema_inferred rather than keeping a misleading explicit evidence.
+                    if not _evidence_mentions_all_entities(ev, entities_in_rel):
+                        logger.warning(
+                            "Explicit relation evidence does not mention all entities; "
+                            f"downgrading to schema_inferred: {entities_in_rel}"
+                        )
+                        relation = relation.model_copy(
+                            update={
+                                "source": "schema_inferred",
+                                "evidence": None,
+                                "confidence": relation.confidence if relation.confidence is not None else 0.5,
+                            }
+                        )
             
             # Fix arity mismatch if needed
             fixed_relation = relation
@@ -298,6 +362,16 @@ Natural language description:
             
             if updates:
                 fixed_relation = fixed_relation.model_copy(update=updates)
+
+            # Normalize relation type to Phase-1 enum (deterministic).
+            # For n-ary relations, use "ternary" (represents 3-ary / n-ary).
+            try:
+                if (fixed_relation.arity or 0) > 2:
+                    fixed_relation = fixed_relation.model_copy(update={"type": RelationType.TERNARY})
+                else:
+                    fixed_relation = fixed_relation.model_copy(update={"type": normalize_relation_type(str(fixed_relation.type))})
+            except Exception:
+                fixed_relation = fixed_relation.model_copy(update={"type": RelationType.ONE_TO_MANY})
             
             valid_relations.append(fixed_relation)
         

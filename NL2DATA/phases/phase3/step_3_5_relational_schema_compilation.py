@@ -224,11 +224,17 @@ def determine_foreign_key_name(
     return fk_name
 
 
+def _get_relation_key(entities: List[str]) -> str:
+    """Generate a deterministic key for a relation based on entity names."""
+    return "_".join(sorted(entities))
+
+
 def step_3_5_relational_schema_compilation(
     er_design: Dict[str, Any],  # ER design from Step 3.4
     foreign_keys: List[Dict[str, Any]],  # Foreign keys from Phase 2 (legacy, may be used for reference)
     primary_keys: Dict[str, List[str]],  # entity -> PK from Phase 2 (needed for junction table FKs)
     constraints: Optional[List[Dict[str, Any]]] = None,  # Constraints from Phase 2
+    junction_table_names: Optional[Dict[str, str]] = None,  # relation_key -> suggested table name from Step 3.45
 ) -> Dict[str, Any]:
     """
     Step 3.5 (deterministic): Compile relational schema from ER design.
@@ -614,7 +620,12 @@ def step_3_5_relational_schema_compilation(
             else:
                 # M:N relationship (both are "N")
                 # Create new relation R
-                junction_table_name = "_".join(sorted([e1_name, e2_name]))
+                # Check if we have a suggested name from Step 3.45
+                relation_key = _get_relation_key([e1_name, e2_name])
+                if junction_table_names and relation_key in junction_table_names:
+                    junction_table_name = junction_table_names[relation_key]
+                else:
+                    junction_table_name = "_".join(sorted([e1_name, e2_name]))
                 junction_columns = []
                 junction_pk = []
                 junction_fks = []
@@ -760,7 +771,12 @@ def step_3_5_relational_schema_compilation(
                         continue
 
             # Default: Create new relation R (junction table)
-            junction_table_name = "_".join(sorted(relation_entities))
+            # Check if we have a suggested name from Step 3.45
+            relation_key = _get_relation_key(relation_entities)
+            if junction_table_names and relation_key in junction_table_names:
+                junction_table_name = junction_table_names[relation_key]
+            else:
+                junction_table_name = "_".join(sorted(relation_entities))
             junction_columns = []
             junction_pk = []
             junction_fks = []
@@ -863,20 +879,5 @@ def step_3_5_relational_schema_compilation(
     relational_schema = {
         "tables": tables,
     }
-    
-    # Log the complete relational schema
-    logger.info("=== RELATIONAL SCHEMA (Step 3.5 Output) ===")
-    logger.info(json.dumps(relational_schema, indent=2, default=str))
-    logger.info("=== END RELATIONAL SCHEMA ===")
-    
-    # Log to pipeline logger if available
-    if PIPELINE_LOGGER_AVAILABLE:
-        try:
-            pipeline_logger = get_pipeline_logger()
-            if pipeline_logger.file_handle:
-                pipeline_logger.log_schema("Phase 3.5: Relational Schema Compilation", relational_schema)
-        except Exception as log_error:
-            # Don't fail the function if logging fails
-            logger.debug(f"Failed to log schema to pipeline logger: {log_error}")
     
     return relational_schema

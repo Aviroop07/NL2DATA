@@ -11,6 +11,57 @@ from NL2DATA.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+def _values_compatible_with_sql_type(sql_type: str, values: List[str]) -> bool:
+    """Return True if the values look compatible with the SQL type (very conservative).
+
+    We use this to avoid producing invalid DDL like:
+      tax_region_id BIGINT CHECK (tax_region_id IN ('state','province',...))
+    """
+    t = (sql_type or "").upper().strip()
+    if not values:
+        return True
+    numeric_types = {"INT", "INTEGER", "BIGINT", "SMALLINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"}
+    if any(t.startswith(x) for x in numeric_types):
+        # All values must be parseable as numbers
+        for v in values:
+            s = str(v).strip()
+            if s == "":
+                return False
+            try:
+                float(s)
+            except Exception:
+                return False
+        return True
+    if t == "BOOLEAN":
+        allowed = {"true", "false", "0", "1"}
+        return all(str(v).strip().lower() in allowed for v in values)
+    # For everything else (VARCHAR/TEXT/DATE/TIMESTAMP), allow strings.
+    return True
+
+
+def _format_check_value_for_type(sql_type: str, value: str) -> Optional[str]:
+    """Format a single CHECK-IN value literal based on SQL type; return None if incompatible."""
+    t = (sql_type or "").upper().strip()
+    v = str(value).strip()
+    if t == "BOOLEAN":
+        low = v.lower()
+        if low in {"true", "false"}:
+            return low.upper()
+        if low in {"0", "1"}:
+            return "TRUE" if low == "1" else "FALSE"
+        return None
+
+    numeric_types = {"INT", "INTEGER", "BIGINT", "SMALLINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"}
+    if any(t.startswith(x) for x in numeric_types):
+        try:
+            float(v)
+            return v
+        except Exception:
+            return None
+
+    # Default: quote as string literal.
+    return f"'{_escape_string(v)}'"
+
 
 def step_5_1_ddl_compilation(
     normalized_schema: Dict[str, Any],  # Normalized schema from Phase 4 (Step 4.2 output)
@@ -79,6 +130,39 @@ def step_5_1_ddl_compilation(
         
         # Build column definitions
         column_defs = []
+
+        def _type_info_to_col_type(type_info: Dict[str, Any]) -> str:
+            sql_type = (type_info.get("type", "VARCHAR") or "VARCHAR")
+            size = type_info.get("size")
+            precision = type_info.get("precision")
+            scale = type_info.get("scale")
+            if str(sql_type).upper() in ("VARCHAR", "CHAR"):
+                if size:
+                    return f"{sql_type}({size})"
+                return f"{sql_type}(255)"
+            if str(sql_type).upper() in ("DECIMAL", "NUMERIC"):
+                if precision and scale is not None:
+                    return f"{sql_type}({precision},{scale})"
+                if precision:
+                    return f"{sql_type}({precision})"
+            return str(sql_type)
+
+        # Deterministic FK type harmonization for DDL:
+        # If we know the referenced key column type, force FK column types to match in DDL.
+        fk_type_overrides: Dict[str, Dict[str, Any]] = {}
+        if data_types and foreign_keys:
+            for fk in foreign_keys:
+                fk_attrs = fk.get("attributes", []) or []
+                ref_table = fk.get("references_table", "")
+                ref_attrs = fk.get("referenced_attributes", []) or []
+                if not (ref_table and fk_attrs and ref_attrs) or len(fk_attrs) != len(ref_attrs):
+                    continue
+                for fk_col, ref_col in zip(fk_attrs, ref_attrs):
+                    if not (isinstance(fk_col, str) and isinstance(ref_col, str)):
+                        continue
+                    ref_type_info = (data_types.get(ref_table, {}) or {}).get(ref_col)
+                    if isinstance(ref_type_info, dict) and (ref_type_info.get("type") or "").strip():
+                        fk_type_overrides[fk_col] = ref_type_info
         for col in columns:
             col_name = col.get("name", "")
             if not col_name:
@@ -124,6 +208,16 @@ def step_5_1_ddl_compilation(
                 type_hint = col.get("type_hint", "")
                 if type_hint:
                     col_type = _infer_type_from_hint(type_hint)
+
+            # Apply FK type override if we know the referenced key type.
+            if col_name in fk_type_overrides:
+                override_type = _type_info_to_col_type(fk_type_overrides[col_name])
+                if override_type and override_type != col_type:
+                    logger.warning(
+                        f"Table {table_name}: Overriding type of FK column '{col_name}' from {col_type} to {override_type} "
+                        f"to match referenced key type."
+                    )
+                col_type = override_type or col_type
             
             # Build column definition
             col_def = f"    {_escape_identifier(col_name)} {col_type}"
@@ -145,8 +239,28 @@ def step_5_1_ddl_compilation(
                 if entity_name in check_constraints and col_name in check_constraints[entity_name]:
                     allowed_values = check_constraints[entity_name][col_name]
                     if allowed_values:
-                        values_str = ", ".join(f"'{_escape_string(v)}'" for v in allowed_values)
-                        col_def += f" CHECK ({_escape_identifier(col_name)} IN ({values_str}))"
+                        if not _values_compatible_with_sql_type(col_type, allowed_values):
+                            logger.warning(
+                                f"Table {table_name}: Skipping CHECK for {col_name} because values are not compatible with type {col_type}. "
+                                f"Values={allowed_values}"
+                            )
+                        else:
+                            formatted: List[str] = []
+                            ok = True
+                            for v in allowed_values:
+                                lit = _format_check_value_for_type(col_type, v)
+                                if lit is None:
+                                    ok = False
+                                    break
+                                formatted.append(lit)
+                            if not ok or not formatted:
+                                logger.warning(
+                                    f"Table {table_name}: Skipping CHECK for {col_name} due to type/value incompatibility after formatting. "
+                                    f"type={col_type}, values={allowed_values}"
+                                )
+                            else:
+                                values_str = ", ".join(formatted)
+                                col_def += f" CHECK ({_escape_identifier(col_name)} IN ({values_str}))"
             
             # Add CHECK constraint from Phase 2 if available
             check_condition = col.get("check_condition")

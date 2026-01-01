@@ -4,15 +4,59 @@ Determines which attribute(s) uniquely identify each entity.
 Critical for table design - every table needs a primary key.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase2_config
 
 logger = get_logger(__name__)
+
+_DT_TOKENS = ("date", "time", "timestamp", "datetime")
+
+
+def _is_datetime_like(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if n.endswith("_at"):
+        return True
+    return any(tok in n for tok in _DT_TOKENS)
+
+
+def _validate_pk_candidate(
+    *,
+    entity_name: str,
+    attributes: List[str],
+    primary_key: List[str],
+    surrogate_key: str,
+) -> Tuple[List[str], List[str]]:
+    """Return (validated_pk, issues)."""
+    issues: List[str] = []
+    allowed = set([a for a in (attributes or []) if isinstance(a, str) and a])
+    allowed.add(surrogate_key)
+
+    pk = [a.strip() for a in (primary_key or []) if isinstance(a, str) and a.strip()]
+
+    invalid = [a for a in pk if a not in allowed]
+    if invalid:
+        issues.append(
+            f"{entity_name}: primary_key contains attributes not in the allowed list: {invalid}. "
+            f"Allowed are the provided attributes plus the surrogate key '{surrogate_key}'."
+        )
+        pk = [a for a in pk if a in allowed]
+
+    if len(pk) == 1 and pk[0] != surrogate_key and _is_datetime_like(pk[0]):
+        issues.append(
+            f"{entity_name}: primary_key is a single datetime-like column '{pk[0]}'. "
+            f"Do not use a datetime/timestamp alone as a primary key unless the NL explicitly guarantees uniqueness. "
+            f"Prefer an existing *_id attribute, a stable natural key, or use the surrogate '{surrogate_key}'."
+        )
+
+    return pk, issues
 
 
 class PrimaryKeyOutput(BaseModel):
@@ -59,6 +103,8 @@ async def step_2_7_primary_key_identification(
         ["customer_id"]
     """
     logger.debug(f"Identifying primary key for entity: {entity_name}")
+    cfg = get_phase2_config()
+    surrogate_key = f"{entity_name.lower()}_id"
     
     # Validate that attributes exist
     if not attributes:
@@ -76,6 +122,10 @@ async def step_2_7_primary_key_identification(
     if entity_description:
         context_parts.append(f"Entity description: {entity_description}")
     context_parts.append(f"Available attributes: {', '.join(attributes)}")
+    context_parts.append(
+        f"Surrogate key option: If no suitable stable key exists in the available attributes, "
+        f"you may choose '{surrogate_key}' as a surrogate primary key. If chosen, it will be added as a new attribute."
+    )
     
     context_msg = "\n\nContext:\n" + "\n".join(f"- {part}" for part in context_parts)
     
@@ -90,7 +140,12 @@ A primary key is a set of attributes that uniquely identifies each instance of t
 
 **CRITICAL CONSTRAINT**: You MUST only use attribute names from the provided attribute list. DO NOT invent or suggest attribute names that are not in the list. If you suggest an attribute name that doesn't exist, it will be rejected and the entity will have no primary key.
 
-**AVAILABLE ATTRIBUTES**: The context will include a list of available attributes. You can ONLY use attributes from this list. If no suitable primary key exists in the available attributes, you may suggest creating an ID attribute, but you must still only reference attributes that exist or clearly indicate that a new attribute needs to be created.
+**SURROGATE KEYS (IMPORTANT)**:
+- If no suitable stable natural key exists in the provided attributes, choose a surrogate key in the form `<entity>_id` (e.g., `customer_id`).
+- You MUST use the exact surrogate key name given in the context (if you choose a surrogate).
+- Do NOT use a datetime/timestamp column alone as a primary key unless the NL explicitly guarantees it is unique.
+
+**AVAILABLE ATTRIBUTES**: You can ONLY use attribute names from the provided attribute list OR the explicitly allowed surrogate key name provided in context. Do NOT invent other new attribute names.
 
 Return a JSON object with:
 - primary_key: List of attribute names that form the primary key (MUST be from the provided attribute list)
@@ -102,8 +157,7 @@ Return a JSON object with:
 
 {context}
 
-Natural Language Description:
-{nl_description}
+{nl_section}
 
 Return a JSON object with the primary key attributes, reasoning, and any alternative candidate keys."""
     
@@ -111,58 +165,73 @@ Return a JSON object with the primary key attributes, reasoning, and any alterna
         # Get model for this step
         llm = get_model_for_step("2.7")
         
-        # Create chain
-        # Invoke standardized LLM call
         config = get_trace_config("2.7", phase=2, tags=["phase_2_step_7"])
-        result: PrimaryKeyOutput = await standardized_llm_call(
-            llm=llm,
-            output_schema=PrimaryKeyOutput,
-            system_prompt=system_prompt,
-            human_prompt_template=human_prompt_template,
-            input_data={
-                "entity_name": entity_name,
-                "context": context_msg,
-                "nl_description": nl_description or "",
-            },
-            config=config,
-        )
-        
-        # Work with Pydantic model directly
-        # Validate that primary key attributes exist
-        pk_attrs = result.primary_key
-        invalid_attrs = [attr for attr in pk_attrs if attr not in attributes]
-        if invalid_attrs:
-            logger.warning(
-                f"Entity {entity_name}: Primary key contains invalid attributes {invalid_attrs} "
-                f"that don't exist in attribute list. Available attributes: {attributes}"
+
+        nl_section = ""
+        if cfg.step_2_7_include_nl_context and (nl_description or "").strip():
+            nl_section = f"Natural Language Description:\n{nl_description}\n"
+        else:
+            nl_section = "Natural Language Description: (omitted)\n"
+
+        feedback: str = ""
+        last_issues: List[str] = []
+
+        for round_idx in range(cfg.step_2_7_max_revision_rounds + 1):
+            prompt = human_prompt_template
+            if feedback:
+                prompt = (
+                    human_prompt_template
+                    + "\n\nRevision required. Fix the issues below and return corrected JSON only.\n"
+                    + "Issues:\n"
+                    + feedback
+                )
+
+            result: PrimaryKeyOutput = await standardized_llm_call(
+                llm=llm,
+                output_schema=PrimaryKeyOutput,
+                system_prompt=system_prompt,
+                human_prompt_template=prompt,
+                input_data={
+                    "entity_name": entity_name,
+                    "context": context_msg,
+                    "nl_section": nl_section,
+                },
+                config=config,
             )
-            # Remove invalid attributes - create new model instance
-            valid_pk = [attr for attr in pk_attrs if attr in attributes]
-            if not valid_pk:
-                logger.error(
-                    f"Entity {entity_name}: No valid primary key attributes found after validation. "
-                    f"LLM suggested: {pk_attrs}, but available attributes are: {attributes}. "
-                    f"Injecting deterministic surrogate key as fallback."
+
+            validated_pk, issues = _validate_pk_candidate(
+                entity_name=entity_name,
+                attributes=attributes,
+                primary_key=result.primary_key,
+                surrogate_key=surrogate_key,
+            )
+            last_issues = issues
+
+            if not issues and validated_pk:
+                result = PrimaryKeyOutput(
+                    primary_key=validated_pk,
+                    reasoning=result.reasoning,
+                    alternative_keys=result.alternative_keys,
                 )
-                # Deterministic fallback: inject surrogate key
-                surrogate_key = f"{entity_name.lower()}_id"
+                break
+
+            if round_idx >= cfg.step_2_7_max_revision_rounds:
                 logger.warning(
-                    f"Entity {entity_name}: Injecting surrogate key '{surrogate_key}' as fallback. "
-                    f"This will be added to the entity's attribute list automatically."
+                    f"Entity {entity_name}: Step 2.7 could not be fully corrected after {cfg.step_2_7_max_revision_rounds} revision round(s). "
+                    f"Falling back to surrogate key '{surrogate_key}'."
                 )
-                valid_pk = [surrogate_key]
-                # Update reasoning to reflect the fallback
-                updated_reasoning = (
-                    f"Original LLM suggestion ({pk_attrs}) contained invalid attributes not in the attribute list. "
-                    f"Deterministic fallback: using surrogate key '{surrogate_key}'."
+                result = PrimaryKeyOutput(
+                    primary_key=[surrogate_key],
+                    reasoning=(
+                        f"Fallback: unable to identify a safe primary key from provided attributes (or LLM output was invalid). "
+                        f"Using surrogate key '{surrogate_key}'."
+                    ),
+                    alternative_keys=[],
                 )
-            else:
-                updated_reasoning = result.reasoning
-            
-            result = PrimaryKeyOutput(
-                primary_key=valid_pk,
-                reasoning=updated_reasoning,
-                alternative_keys=result.alternative_keys
+                break
+
+            feedback = "\n".join(f"- {x}" for x in (issues or [])) or (
+                f"- {entity_name}: primary_key is empty/invalid after validation; choose a stable key or '{surrogate_key}'."
             )
         
         # Validate alternative keys
@@ -182,9 +251,7 @@ Return a JSON object with the primary key attributes, reasoning, and any alterna
                 alternative_keys=validated_alt_keys
             )
         
-        logger.debug(
-            f"Entity {entity_name}: Primary key identified as {result.primary_key}"
-        )
+        logger.debug(f"Entity {entity_name}: Primary key identified as {result.primary_key}")
         
         # Convert to dict only at return boundary
         return result.model_dump()

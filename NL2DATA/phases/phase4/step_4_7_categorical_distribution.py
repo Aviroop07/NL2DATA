@@ -11,6 +11,7 @@ from NL2DATA.phases.phase4.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase4_config
 from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_attribute_name,
     extract_attribute_description,
@@ -64,6 +65,7 @@ async def step_4_7_categorical_distribution(
         1.0
     """
     logger.debug(f"Determining categorical distribution for {entity_name}.{categorical_attribute}")
+    cfg = get_phase4_config()
     
     # Validate that values exist
     if not values:
@@ -118,10 +120,10 @@ CRITICAL: The sum of all probabilities in the distribution MUST equal 1.0. Round
 
 {context}
 
-Natural Language Description:
-{nl_description}
+Return a JSON object with the probability distribution (probabilities must sum to 1.0) and reasoning.
 
-Return a JSON object with the probability distribution (probabilities must sum to 1.0) and reasoning."""
+IMPORTANT:
+- Do NOT use the original NL description here. Use only the provided value set."""
 
     # Initialize model and create chain
     llm = get_model_for_step("4.7")  # Step 4.7 maps to "high_fanout" task type
@@ -136,7 +138,7 @@ Return a JSON object with the probability distribution (probabilities must sum t
                 "entity_name": entity_name,
                 "categorical_attribute": categorical_attribute,
                 "context": context_msg,
-                "nl_description": nl_description or "",
+                "nl_section": "",
             },
             config=config,
         )
@@ -172,11 +174,20 @@ Return a JSON object with the probability distribution (probabilities must sum t
         return output_dict
         
     except Exception as e:
-        logger.error(
-            f"Error determining categorical distribution for {entity_name}.{categorical_attribute}: {e}",
-            exc_info=True
+        # We'll fall back deterministically; keep the log non-fatal and avoid huge tracebacks.
+        logger.warning(
+            f"Error determining categorical distribution for {entity_name}.{categorical_attribute}: {e}. "
+            f"Falling back to uniform distribution."
         )
-        raise
+        # Fail-open: return a uniform distribution so downstream phases can proceed deterministically.
+        n = len(values or [])
+        if n <= 0:
+            return {"distribution": {}, "reasoning": f"Error during distribution determination: {str(e)}"}
+        p = 1.0 / n
+        return {
+            "distribution": {v: p for v in values},
+            "reasoning": f"Deterministic fallback: uniform distribution due to error: {str(e)}",
+        }
 
 
 async def step_4_7_categorical_distribution_batch(

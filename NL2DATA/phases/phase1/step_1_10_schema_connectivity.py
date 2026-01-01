@@ -16,6 +16,7 @@ from NL2DATA.phases.phase1.utils import (
     build_relation_list_string,
 )
 from NL2DATA.utils.tools.validation_tools import _check_entity_connectivity_impl
+from NL2DATA.ir.models.relation_type import RelationType, normalize_relation_type
 
 logger = get_logger(__name__)
 
@@ -342,11 +343,18 @@ async def step_1_10_schema_connectivity_with_loop(
                         unique_entities.append(e)
                         seen.add(e)
                 
+                # For connectivity suggestions we typically don't have enough signal to infer direction.
+                # We keep the schema consistent by using the Phase-1 enum and treating suggestions
+                # as schema_inferred with low confidence.
+                rel_type = RelationType.TERNARY if len(unique_entities) > 2 else RelationType.ONE_TO_MANY
                 parsed_relations.append({
                     "entities": unique_entities,
                     "description": suggested_rel.strip(),
-                    "type": "binary" if len(unique_entities) == 2 else "n-ary",
-                    "source": "connectivity_suggestion"
+                    "type": normalize_relation_type(rel_type.value).value,
+                    "arity": len(unique_entities),
+                    "source": "schema_inferred",
+                    "evidence": None,
+                    "confidence": 0.3,
                 })
             else:
                 logger.debug(f"Could not parse suggested relation: {suggested_rel} (found {len(found_entities)} entities)")

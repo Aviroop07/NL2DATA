@@ -11,6 +11,8 @@ from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase2_config
+from NL2DATA.utils.pipeline_config import get_phase2_config
 
 logger = get_logger(__name__)
 
@@ -69,6 +71,7 @@ async def step_2_10_unique_constraints(
         True
     """
     logger.debug(f"Identifying unique constraints for entity: {entity_name}")
+    cfg = get_phase2_config()
     
     # Validate that attributes exist
     if not attributes:
@@ -115,12 +118,14 @@ Return a JSON object with:
 
 {context}
 
-Natural Language Description:
-{nl_description}
+Return a JSON object identifying which attributes or attribute combinations must be unique, along with reasoning.
 
-Return a JSON object identifying which attributes or attribute combinations must be unique, along with reasoning."""
+IMPORTANT:
+- Use ONLY the provided attribute list.
+- Do NOT use the original NL description to introduce attributes from other entities."""
     
     try:
+        cfg = get_phase2_config()
         # Get model for this step
         llm = get_model_for_step("2.10")
         
@@ -134,7 +139,6 @@ Return a JSON object identifying which attributes or attribute combinations must
             input_data={
                 "entity_name": entity_name,
                 "context": context_msg,
-                "nl_description": nl_description or "",
             },
             config=config,
         )

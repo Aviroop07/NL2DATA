@@ -4,7 +4,9 @@ Extracts attributes that are inherent to the entity (not relationship-based).
 These form the core columns of each table.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
+import json
+import re
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase2.model_router import get_model_for_step
@@ -12,6 +14,7 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.ir.models.state import AttributeInfo
+from NL2DATA.utils.pipeline_config import get_phase2_config
 
 logger = get_logger(__name__)
 
@@ -23,6 +26,95 @@ class IntrinsicAttributesOutput(BaseModel):
     )
 
 
+def _norm_text(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _entity_tokens(entity_name: str) -> Set[str]:
+    """Conservative tokens for entity-name matching."""
+    base = _norm_text(entity_name)
+    tokens: Set[str] = set()
+    if base:
+        tokens.add(base)
+        tokens.add(base.replace(" ", ""))  # "sales funnel stage" -> "salesfunnelstage"
+    return tokens
+
+
+def _detect_intrinsic_attribute_issues(
+    *,
+    entity_name: str,
+    attributes: List[AttributeInfo],
+    all_entity_names: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Detect issues deterministically; do NOT mutate attributes.
+
+    The returned issues are fed back to the LLM so the LLM decides the final list.
+    """
+    issues: List[Dict[str, Any]] = []
+    seen_names: Set[str] = set()
+
+    other_entity_tokens: Set[str] = set()
+    for en in (all_entity_names or []):
+        if not en or en == entity_name:
+            continue
+        other_entity_tokens |= _entity_tokens(en)
+
+    for idx, attr in enumerate(attributes):
+        name = (attr.name or "").strip()
+        name_lc = name.lower()
+        blob = _norm_text(" ".join([name, attr.description or "", attr.reasoning or ""]))
+        blob_compact = blob.replace(" ", "")
+
+        # Duplicate name within entity
+        if name_lc in seen_names:
+            issues.append(
+                {
+                    "attribute": name,
+                    "issue_type": "duplicate_name",
+                    "detail": "Duplicate attribute name within the same entity (case-insensitive).",
+                    "index": idx,
+                }
+            )
+        seen_names.add(name_lc)
+
+        # Name validity (lightweight)
+        if name and not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            issues.append(
+                {
+                    "attribute": name,
+                    "issue_type": "invalid_name_format",
+                    "detail": "Attribute name should be snake_case (letters/numbers/underscore) and start with a letter.",
+                    "index": idx,
+                }
+            )
+
+        # Mention of other entities (name/description/reasoning)
+        for tok in other_entity_tokens:
+            if tok and (tok in blob or tok in blob_compact):
+                issues.append(
+                    {
+                        "attribute": name,
+                        "issue_type": "mentions_other_entity",
+                        "detail": f"Attribute name/description/reasoning appears to reference another entity token '{tok}'.",
+                        "index": idx,
+                    }
+                )
+                break
+
+        # Collection-like attributes (nested structure smell)
+        if any(p in blob for p in ["list of", "array", "json", "collection", "events that occurred"]):
+            issues.append(
+                {
+                    "attribute": name,
+                    "issue_type": "collection_like_attribute",
+                    "detail": "Attribute looks like a nested collection (list/array/json). This often indicates it should be modeled as a separate entity/table.",
+                    "index": idx,
+                }
+            )
+
+    return issues
+
+
 @traceable_step("2.2", phase=2, tags=['phase_2_step_2'])
 async def step_2_2_intrinsic_attributes(
     entity_name: str,
@@ -32,6 +124,7 @@ async def step_2_2_intrinsic_attributes(
     domain: Optional[str] = None,
     relations: Optional[List[Dict[str, Any]]] = None,
     primary_key: Optional[List[str]] = None,
+    all_entity_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Step 2.2 (per-entity): Extract attributes that are inherent to the entity.
@@ -119,7 +212,11 @@ async def step_2_2_intrinsic_attributes(
         if relation_details:
             context_parts.append(f"Relations this entity participates in:\n" + "\n".join(relation_details))
     
-    # 5. Explicit attributes
+    # 5. Entity registry (helps avoid "attribute leakage" from connected entities)
+    if all_entity_names:
+        context_parts.append("All entities in schema: " + ", ".join([n for n in all_entity_names if n]))
+
+    # 6. Explicit attributes
     if explicit_attributes:
         context_parts.append(f"Explicitly mentioned attributes: {', '.join(explicit_attributes)}")
     
@@ -136,6 +233,11 @@ async def step_2_2_intrinsic_attributes(
     system_prompt = """You are a database design assistant. Your task is to extract all intrinsic attributes (properties/columns) that are inherent to an entity.
 
 **CRITICAL INSTRUCTION**: DO NOT generate any attributes that connect this entity to other entities through relations. Only generate intrinsic attributes that describe properties of the entity itself. Foreign keys and relation-connecting attributes will be handled separately in later steps.
+
+Additional critical constraints:
+- Do NOT output attributes that are collections / nested structures (e.g., lists of events, arrays, JSON blobs). If the description implies repeated records (events), that should be modeled as its own entity/table.
+- Do NOT output attributes whose NAME suggests a foreign key connection (e.g., `customer_id`, `order_id`, `product_id`, `zone_id`, `driver_id`). These are relation-connecting attributes and will be handled automatically in later steps.
+- It is OK to mention other entities in the attribute DESCRIPTION if it helps clarify the attribute's purpose (e.g., "The fare amount charged to the rider" is fine, even though it mentions "rider"). The issue is when the ATTRIBUTE NAME itself suggests a connection (e.g., `rider_id`).
 
 Intrinsic attributes are properties that belong directly to the entity itself, not relationships with other entities. Examples:
 - Customer: name, email, phone, address, date_of_birth
@@ -243,8 +345,11 @@ Natural language description:
     # Initialize model
     llm = get_model_for_step("2.2")  # Step 2.2 maps to "high_fanout" task type
     
+    cfg = get_phase2_config()
     try:
         config = get_trace_config("2.2", phase=2, tags=["intrinsic_attributes"])
+
+        # Initial extraction
         result: IntrinsicAttributesOutput = await standardized_llm_call(
             llm=llm,
             output_schema=IntrinsicAttributesOutput,
@@ -253,17 +358,73 @@ Natural language description:
             input_data={"nl_description": nl_description},
             config=config,
         )
-        
-        # Work with Pydantic model directly
+
+        # Revision loop: detect issues deterministically, ask LLM to revise (no Python deletions)
+        for round_idx in range(cfg.step_2_2_max_revision_rounds):
+            issues = _detect_intrinsic_attribute_issues(
+                entity_name=entity_name,
+                attributes=result.attributes,
+                all_entity_names=all_entity_names,
+            )
+            if not issues:
+                break
+
+            logger.warning(
+                f"Entity {entity_name}: Step 2.2 detected {len(issues)} issue(s); "
+                f"requesting LLM revision round {round_idx + 1}/{cfg.step_2_2_max_revision_rounds}."
+            )
+
+            revision_system_prompt = """You are a database design assistant.
+
+You previously produced a list of intrinsic attributes for an entity.
+You will now receive:
+- The entity and enhanced context (including relations and entity registry)
+- Your previous attribute list (JSON)
+- A deterministic list of issues detected in that list
+
+Task:
+Return a revised FULL attribute list that fixes the issues while obeying the original rules:
+- Only intrinsic attributes
+- No relation-connecting attributes / foreign keys (attributes whose NAME suggests a connection, e.g., `customer_id`, `order_id`, `zone_id`)
+- No nested collection attributes (arrays/lists/json blobs)
+- Use snake_case for attribute names
+- It is OK to mention other entities in attribute descriptions for clarity, but the attribute NAME itself should not suggest a connection
+
+Return ONLY valid JSON matching the required schema."""
+
+            revision_human_prompt = f"""Entity: {entity_name}{context_msg}
+
+Natural language description:
+{{nl_description}}
+
+Previous attributes (JSON):
+{{previous_attributes_json}}
+
+Detected issues (JSON):
+{{issues_json}}
+
+Return a revised JSON object with key "attributes" containing the corrected intrinsic attributes."""
+
+            result = await standardized_llm_call(
+                llm=llm,
+                output_schema=IntrinsicAttributesOutput,
+                system_prompt=revision_system_prompt,
+                human_prompt_template=revision_human_prompt,
+                input_data={
+                    "nl_description": nl_description,
+                    "previous_attributes_json": json.dumps(result.model_dump(), ensure_ascii=True),
+                    "issues_json": json.dumps(issues, ensure_ascii=True),
+                },
+                config=config,
+            )
+
         attributes = result.attributes
         attribute_names = [attr.name for attr in attributes]
-        
         logger.debug(
             f"Entity {entity_name}: extracted {len(attributes)} intrinsic attributes: "
             f"{', '.join(attribute_names)}"
         )
-        
-        # Convert to dict only at return boundary
+
         return result.model_dump()
         
     except Exception as e:
@@ -311,6 +472,11 @@ async def step_2_2_intrinsic_attributes_batch(
     # Execute in parallel for all entities
     import asyncio
     
+    all_entity_names = [
+        e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")
+        for e in entities
+    ]
+
     tasks = []
     for entity in entities:
         entity_name = entity.get("name", "Unknown") if isinstance(entity, dict) else getattr(entity, "name", "Unknown")
@@ -342,6 +508,7 @@ async def step_2_2_intrinsic_attributes_batch(
             domain=domain,
             relations=entity_relations,
             primary_key=entity_pk,
+            all_entity_names=all_entity_names,
         )
         tasks.append((entity_name, task))
     

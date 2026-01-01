@@ -4,7 +4,7 @@ Determines default values for attributes (e.g., created_at defaults to CURRENT_T
 Important for data generation and application logic.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
 import re
 
@@ -12,6 +12,7 @@ from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase2_config
 
 logger = get_logger(__name__)
 
@@ -19,7 +20,8 @@ logger = get_logger(__name__)
 class DefaultValuesOutput(BaseModel):
     """Output structure for default value identification."""
     # NOTE: Marked Optional to improve OpenAI response_format JSON-schema compatibility.
-    default_values: Optional[Dict[str, str]] = Field(
+    # IMPORTANT: Defaults can be numeric/boolean/null as well as strings.
+    default_values: Optional[Dict[str, Union[str, int, float, bool, None]]] = Field(
         default_factory=dict,
         description="Dictionary mapping attribute names to their default values (e.g., {'status': 'active', 'created_at': 'CURRENT_TIMESTAMP'})"
     )
@@ -184,12 +186,14 @@ Only include attributes that should have defaults. Not all attributes need defau
 
 {context}
 
-Natural Language Description:
-{nl_description}
+Return a JSON object identifying which attributes should have default values and what those defaults should be, along with reasoning.
 
-Return a JSON object identifying which attributes should have default values and what those defaults should be, along with reasoning."""
+IMPORTANT:
+- Use ONLY the provided attribute list.
+- Do NOT use the original NL description to introduce attributes from other entities."""
     
     try:
+        _ = get_phase2_config()
         # Get model for this step
         llm = get_model_for_step("2.12")
         
@@ -203,7 +207,7 @@ Return a JSON object identifying which attributes should have default values and
             input_data={
                 "entity_name": entity_name,
                 "context": context_msg,
-                "nl_description": nl_description or "",
+                "nl_description": "",
             },
             config=config,
         )

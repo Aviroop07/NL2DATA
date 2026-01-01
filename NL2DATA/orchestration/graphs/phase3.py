@@ -125,6 +125,33 @@ def _wrap_step_3_4(step_func):
     return node
 
 
+def _wrap_step_3_45(step_func):
+    """Wrap Step 3.45 to work as LangGraph node."""
+    async def node(state: IRGenerationState) -> Dict[str, Any]:
+        logger.info("[LangGraph] Executing Step 3.45: Junction Table Naming")
+        prev_answers = state.get("previous_answers", {})
+        metadata = state.get("metadata", {})
+        er_design = metadata.get("er_design", {})
+        
+        # Extract entities and relations from ER design
+        entities = er_design.get("entities", [])
+        relations = er_design.get("relations", [])
+        
+        result = await step_func(
+            relations=relations,
+            entities=entities,
+            nl_description=state.get("nl_description"),
+            domain=state.get("domain"),
+        )
+        
+        return {
+            "current_step": "3.45",
+            "previous_answers": {**prev_answers, "3.45": result},
+            "junction_table_names": result,
+        }
+    return node
+
+
 def _wrap_step_3_5(step_func):
     """Wrap Step 3.5 to work as LangGraph node."""
     async def node(state: IRGenerationState) -> Dict[str, Any]:
@@ -135,8 +162,8 @@ def _wrap_step_3_5(step_func):
             er_design=metadata.get("er_design", {}),
             foreign_keys=state.get("foreign_keys", []),
             primary_keys=state.get("primary_keys", {}),
-            relations=state.get("relations", []),
-            attributes=state.get("attributes", {})
+            constraints=state.get("constraints"),
+            junction_table_names=state.get("junction_table_names", {}),
         )
         
         return {
@@ -168,6 +195,7 @@ def create_phase_3_graph() -> StateGraph:
         step_3_2_information_completeness_batch,
         step_3_3_phase2_reexecution,
         step_3_4_er_design_compilation,
+        step_3_45_junction_table_naming,
         step_3_5_relational_schema_compilation,
     )
     
@@ -179,6 +207,7 @@ def create_phase_3_graph() -> StateGraph:
     workflow.add_node("completeness_check", _wrap_step_3_2(step_3_2_information_completeness_batch))
     workflow.add_node("phase2_reexecution", _wrap_step_3_3(step_3_3_phase2_reexecution))
     workflow.add_node("er_compilation", _wrap_step_3_4(step_3_4_er_design_compilation))
+    workflow.add_node("junction_naming", _wrap_step_3_45(step_3_45_junction_table_naming))
     workflow.add_node("relational_compilation", _wrap_step_3_5(step_3_5_relational_schema_compilation))
     
     # Set entry point
@@ -188,7 +217,8 @@ def create_phase_3_graph() -> StateGraph:
     workflow.add_edge("information_needs", "completeness_check")
     workflow.add_edge("completeness_check", "phase2_reexecution")
     workflow.add_edge("phase2_reexecution", "er_compilation")
-    workflow.add_edge("er_compilation", "relational_compilation")
+    workflow.add_edge("er_compilation", "junction_naming")
+    workflow.add_edge("junction_naming", "relational_compilation")
     workflow.add_edge("relational_compilation", END)
     
     # Compile with checkpointing

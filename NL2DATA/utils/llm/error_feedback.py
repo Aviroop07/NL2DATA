@@ -61,7 +61,7 @@ def format_error_feedback(
     error_msg = error_info.get("error_message", "")
     error_details = error_info.get("error_details", {})
     
-    feedback = f"""⚠️ PREVIOUS ATTEMPT #{attempt_number} FAILED - PLEASE CORRECT YOUR OUTPUT ⚠️
+    feedback = f"""PREVIOUS ATTEMPT #{attempt_number} FAILED - PLEASE CORRECT YOUR OUTPUT
 
 Error Type: {error_type}
 Error Message: {error_msg}
@@ -109,7 +109,7 @@ Error Message: {error_msg}
     # Add schema reference
     feedback = format_schema_reference(output_schema, feedback)
     
-    feedback += """✅ CORRECT OUTPUT FORMAT:
+    feedback += """CORRECT OUTPUT FORMAT:
 - Return ONLY a valid JSON object
 - No markdown, no code blocks, no explanatory text
 - Match the schema exactly (correct field names, correct types)
@@ -243,7 +243,7 @@ def create_error_feedback_message(
     except Exception as e:
         # Fallback: if error feedback creation fails, provide basic feedback
         logger.warning(f"Failed to create detailed error feedback: {e}. Using fallback feedback.")
-        return f"""⚠️ PREVIOUS ATTEMPT #{attempt_number} FAILED ⚠️
+        return f"""PREVIOUS ATTEMPT #{attempt_number} FAILED
 
 Error Type: {type(error).__name__}
 Error Message: {str(error)[:500]}

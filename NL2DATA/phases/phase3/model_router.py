@@ -17,6 +17,7 @@ PHASE3_STEP_MAPPING: dict[str, TaskType] = {
     "3.1": "advanced_reasoning",  # Information Need Identification - advanced reasoning, use o3
     "3.2": "advanced_reasoning",   # Information Completeness Check - advanced reasoning, use o3
     "3.3": "high_fanout",          # Phase 2 Steps with Enhanced Context - per-entity/per-attribute
+    "3.45": "important",           # Junction Table Naming - important for schema quality
     # 3.4 and 3.5 are deterministic (no LLM)
 }
 

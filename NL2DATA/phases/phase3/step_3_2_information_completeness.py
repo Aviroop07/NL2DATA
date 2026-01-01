@@ -4,19 +4,19 @@ For each information need, verify if all necessary relations, entities, and attr
 Iterative loop per information need until LLM is satisfied.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase3.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
-from NL2DATA.phases.phase1.utils.data_extraction import extract_attribute_name
-from NL2DATA.utils.loops import SafeLoopExecutor, LoopConfig
-from NL2DATA.utils.tools.validation_tools import (
-    _check_schema_component_exists_impl,
-    _validate_attributes_exist_impl,
+from NL2DATA.phases.phase1.utils.data_extraction import (
+    extract_attribute_name,
+    extract_attribute_description,
 )
+from NL2DATA.utils.loops import SafeLoopExecutor, LoopConfig
+from NL2DATA.utils.pipeline_config import get_phase3_config
 
 logger = get_logger(__name__)
 
@@ -42,13 +42,24 @@ class MissingDerivedAttribute(BaseModel):
     reasoning: str = Field(description="Why this derived attribute would make querying easier")
 
 
+class MissingRelation(BaseModel):
+    """Missing relation specification (structured)."""
+
+    entities: List[str] = Field(
+        description="Canonical entity names that participate in this relation (2 or more). Use ONLY entity names present in the provided context."
+    )
+    description: str = Field(
+        description="Short description of the relation (what it means / why needed for this information need)."
+    )
+
+
 class InformationCompletenessOutput(BaseModel):
     """Output structure for information completeness check."""
     information_need: str = Field(description="The information need being checked")
     all_present: bool = Field(description="Whether all necessary components are present")
-    missing_relations: List[str] = Field(
+    missing_relations: List[MissingRelation] = Field(
         default_factory=list,
-        description="List of missing relation descriptions (e.g., 'Customer-Order relation')"
+        description="List of missing relations as structured entries {entities, description}."
     )
     missing_entities: List[str] = Field(
         default_factory=list,
@@ -66,6 +77,361 @@ class InformationCompletenessOutput(BaseModel):
         description="Whether the LLM is satisfied that all components are present (termination condition for loop)"
     )
     reasoning: str = Field(description="Reasoning for the completeness assessment and satisfaction decision")
+
+
+def _canonicalize_entity_name(name: str, allowed_entities: Set[str]) -> Optional[str]:
+    """Best-effort map of a model-produced entity name to canonical entity names."""
+    if not name:
+        return None
+    n = name.strip()
+    if n in allowed_entities:
+        return n
+    # case-insensitive exact
+    for e in allowed_entities:
+        if e.lower() == n.lower():
+            return e
+    # strip common plurals
+    n2 = n[:-1] if n.lower().endswith("s") and len(n) > 3 else n
+    for e in allowed_entities:
+        if e.lower() == n2.lower():
+            return e
+    # substring containment (very conservative)
+    n_l = n.lower()
+    candidates = [e for e in allowed_entities if e.lower() in n_l or n_l in e.lower()]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _relation_has_pair(rel: Dict[str, Any], a: str, b: str) -> bool:
+    ents = rel.get("entities") or []
+    if not isinstance(ents, list):
+        return False
+    s = {x for x in ents if isinstance(x, str)}
+    return a in s and b in s
+
+
+def _build_entity_graph(relations: List[Dict[str, Any]]) -> Dict[str, Set[str]]:
+    graph: Dict[str, Set[str]] = {}
+    for rel in relations or []:
+        ents = rel.get("entities") or []
+        if not isinstance(ents, list):
+            continue
+        ents = [e for e in ents if isinstance(e, str) and e]
+        for i in range(len(ents)):
+            for j in range(i + 1, len(ents)):
+                a, b = ents[i], ents[j]
+                graph.setdefault(a, set()).add(b)
+                graph.setdefault(b, set()).add(a)
+    return graph
+
+
+def _has_join_path(graph: Dict[str, Set[str]], src: str, dst: str) -> bool:
+    if not src or not dst:
+        return False
+    if src == dst:
+        return True
+    if src not in graph or dst not in graph:
+        return False
+    seen: Set[str] = {src}
+    q: List[str] = [src]
+    while q:
+        cur = q.pop(0)
+        for nxt in graph.get(cur, set()):
+            if nxt == dst:
+                return True
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            q.append(nxt)
+    return False
+
+
+def _looks_like_aggregate_metric(derivation_hint: str) -> bool:
+    txt = (derivation_hint or "").lower()
+    if not txt:
+        return False
+    needles = [
+        "count(",
+        "sum(",
+        "avg(",
+        "min(",
+        "max(",
+        "group by",
+        " over(",
+        " window ",
+    ]
+    return any(n in txt for n in needles)
+
+
+def _extract_entities_from_relation_text(rel_text: str, allowed_entities: Set[str]) -> List[str]:
+    """Extract canonical entity names that appear inside a free-form relation string."""
+    if not rel_text:
+        return []
+    t = rel_text.lower()
+    hits = [e for e in allowed_entities if e.lower() in t]
+    # Deduplicate while preserving order
+    seen: Set[str] = set()
+    out: List[str] = []
+    for e in hits:
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out
+
+
+def _build_rich_context(
+    *,
+    info_desc: str,
+    info_entities: List[str],
+    entities: List[Dict[str, Any]],
+    relations: List[Dict[str, Any]],
+    attributes: Dict[str, List[Dict[str, Any]]],
+    primary_keys: Dict[str, List[str]],
+    domain: Optional[str],
+    previous_check: Optional[Dict[str, Any]],
+) -> str:
+    """Build a richer schema context: entities + participating relations + connected entities + attribute descriptions."""
+    allowed_entities = {
+        (e.get("name") if isinstance(e, dict) else getattr(e, "name", "")) for e in (entities or [])
+    }
+    allowed_entities = {e for e in allowed_entities if e}
+
+    entity_by_name: Dict[str, Dict[str, Any]] = {}
+    for e in entities or []:
+        if isinstance(e, dict) and e.get("name"):
+            entity_by_name[e["name"]] = e
+
+    # Determine connected entities (1-hop) via relations that touch any info entity
+    info_entities_canon = [x for x in info_entities if x in allowed_entities]
+    connected: Set[str] = set(info_entities_canon)
+    participating_relations: List[Dict[str, Any]] = []
+    for rel in relations or []:
+        rel_ents = rel.get("entities") or []
+        if not isinstance(rel_ents, list):
+            continue
+        if any(e in rel_ents for e in info_entities_canon):
+            participating_relations.append(rel)
+            for e in rel_ents:
+                if isinstance(e, str) and e in allowed_entities:
+                    connected.add(e)
+
+    # Build context parts
+    parts: List[str] = []
+    if domain:
+        parts.append(f"Domain: {domain}")
+    parts.append(f"Information Need (MUST echo this exactly in output.information_need): {info_desc}")
+    parts.append(f"Entities Involved (canonical): {', '.join(info_entities_canon) if info_entities_canon else '(none)'}")
+
+    def _fmt_entity_block(entity_name: str) -> str:
+        e = entity_by_name.get(entity_name, {})
+        desc = (e.get("description") or "").strip()
+        pk = primary_keys.get(entity_name, []) or []
+        attrs = attributes.get(entity_name, []) or []
+        attr_lines: List[str] = []
+        for a in attrs:
+            a_name = extract_attribute_name(a)
+            a_desc = (extract_attribute_description(a) or "").strip()
+            if a_desc:
+                attr_lines.append(f"    - {a_name}: {a_desc}")
+            else:
+                attr_lines.append(f"    - {a_name}")
+        header = f"- {entity_name}"
+        if desc:
+            header += f": {desc}"
+        if pk:
+            header += f" (PK: {', '.join(pk)})"
+        block = [header, "  Attributes (intrinsic only; foreign keys handled later):"]
+        block.extend(attr_lines if attr_lines else ["    - (none)"])
+        return "\n".join(block)
+
+    parts.append("Entities + attributes:")
+    for name in sorted(connected):
+        parts.append(_fmt_entity_block(name))
+
+    if participating_relations:
+        rel_lines: List[str] = []
+        for rel in participating_relations:
+            rel_ents = rel.get("entities") or []
+            rel_type = rel.get("type", "")
+            rel_desc = rel.get("description", "")
+            ent_str = ", ".join([e for e in rel_ents if isinstance(e, str)])
+            # Make it explicit that this relation EXISTS
+            line = f"- EXISTS: {rel_type} relation between {ent_str}"
+            if rel_desc:
+                line += f" ({rel_desc})"
+            rel_lines.append(line)
+        parts.append("Relations involving involved/connected entities (these relations ALREADY EXIST - do NOT list them as missing):")
+        parts.extend(rel_lines)
+
+    if previous_check:
+        parts.append("Previous check (do NOT repeat already-resolved missing items):")
+        prev = []
+        if previous_check.get("missing_relations"):
+            prev.append(f"- missing_relations: {previous_check.get('missing_relations')}")
+        if previous_check.get("missing_entities"):
+            prev.append(f"- missing_entities: {previous_check.get('missing_entities')}")
+        if previous_check.get("missing_intrinsic_attributes"):
+            prev.append(f"- missing_intrinsic_attributes: {previous_check.get('missing_intrinsic_attributes')}")
+        if previous_check.get("missing_derived_attributes"):
+            prev.append(f"- missing_derived_attributes: {previous_check.get('missing_derived_attributes')}")
+        parts.extend(prev if prev else ["- (none)"])
+
+    return "\n".join(parts)
+
+
+def _apply_deterministic_cleanup(
+    *,
+    info_desc: str,
+    entities: List[Dict[str, Any]],
+    relations: List[Dict[str, Any]],
+    attributes: Dict[str, List[Dict[str, Any]]],
+    result: InformationCompletenessOutput,
+) -> InformationCompletenessOutput:
+    """Remove false-positive missing components deterministically."""
+    allowed_entities = {
+        (e.get("name") if isinstance(e, dict) else getattr(e, "name", "")) for e in (entities or [])
+    }
+    allowed_entities = {e for e in allowed_entities if e}
+
+    # Canonicalize and filter missing_entities
+    cleaned_missing_entities: List[str] = []
+    for m in result.missing_entities or []:
+        canon = _canonicalize_entity_name(m, allowed_entities)
+        if canon is not None:
+            # It's actually present (or a clear variant). Remove it.
+            logger.warning(
+                f"Information need '{info_desc}' reports missing entity '{m}' but it exists in the schema (as '{canon}') - filtering out false positive"
+            )
+            continue
+        cleaned_missing_entities.append(m)
+
+    # Build attribute name set per entity (case-insensitive)
+    attr_names_by_entity_ci: Dict[str, Set[str]] = {}
+    for e in allowed_entities:
+        names = set()
+        for a in attributes.get(e, []) or []:
+            names.add(extract_attribute_name(a).lower())
+        attr_names_by_entity_ci[e] = names
+
+    cleaned_missing_intrinsic: List[MissingIntrinsicAttribute] = []
+    for a in result.missing_intrinsic_attributes or []:
+        ent = a.entity
+        canon_ent = _canonicalize_entity_name(ent, allowed_entities)
+        if canon_ent is None:
+            logger.warning(
+                f"Information need '{info_desc}' reports missing intrinsic attribute for entity '{ent}' but entity doesn't exist - filtering out"
+            )
+            continue
+        attr_name = (a.attribute or "").strip()
+        if attr_name and attr_name.lower() in attr_names_by_entity_ci.get(canon_ent, set()):
+            logger.warning(
+                f"Information need '{info_desc}' reports missing intrinsic attribute '{ent}.{attr_name}' but it exists - filtering out false positive"
+            )
+            continue
+        cleaned_missing_intrinsic.append(
+            MissingIntrinsicAttribute(entity=canon_ent, attribute=attr_name, reasoning=a.reasoning)
+        )
+
+    cleaned_missing_derived: List[MissingDerivedAttribute] = []
+    for a in result.missing_derived_attributes or []:
+        ent = a.entity
+        canon_ent = _canonicalize_entity_name(ent, allowed_entities)
+        if canon_ent is None:
+            logger.warning(
+                f"Information need '{info_desc}' reports missing derived attribute for entity '{ent}' but entity doesn't exist - filtering out"
+            )
+            continue
+        attr_name = (a.attribute or "").strip()
+        # If it already exists as an intrinsic attribute, don't claim it's missing
+        if attr_name and attr_name.lower() in attr_names_by_entity_ci.get(canon_ent, set()):
+            logger.warning(
+                f"Information need '{info_desc}' reports missing derived attribute '{ent}.{attr_name}' but attribute exists - filtering out false positive"
+            )
+            continue
+        if _looks_like_aggregate_metric(a.derivation_hint or ""):
+            logger.warning(
+                f"Information need '{info_desc}' suggests aggregate/query-metric derived attribute '{canon_ent}.{attr_name}' - filtering out (not a row-level derived attribute)"
+            )
+            continue
+        cleaned_missing_derived.append(
+            MissingDerivedAttribute(
+                entity=canon_ent,
+                attribute=attr_name,
+                derivation_hint=a.derivation_hint,
+                reasoning=a.reasoning,
+            )
+        )
+
+    # Filter missing_relations (structured): require 2+ known entities; drop if relation already exists.
+    graph = _build_entity_graph(relations or [])
+    cleaned_missing_relations: List[MissingRelation] = []
+    for mr in result.missing_relations or []:
+        mr_entities = list(mr.entities or [])
+        mr_desc = (mr.description or "").strip()
+
+        canon_entities: List[str] = []
+        for e in mr_entities:
+            canon = _canonicalize_entity_name(e, allowed_entities)
+            if canon is None:
+                logger.warning(
+                    f"Information need '{info_desc}' reports missing relation with unknown entity '{e}' - filtering out"
+                )
+                canon_entities = []
+                break
+            canon_entities.append(canon)
+
+        # Dedup while preserving order
+        seen_e: Set[str] = set()
+        canon_entities = [e for e in canon_entities if e and not (e in seen_e or seen_e.add(e))]
+
+        if len(canon_entities) < 2:
+            logger.warning(
+                f"Information need '{info_desc}' reports missing relation but does not specify 2+ valid entities - filtering out"
+            )
+            continue
+
+        # If any entity pair already has a relation, treat as present
+        found_present = False
+        for i in range(len(canon_entities)):
+            for j in range(i + 1, len(canon_entities)):
+                a, b = canon_entities[i], canon_entities[j]
+                if any(_relation_has_pair(rel, a, b) for rel in relations or []):
+                    found_present = True
+                    break
+                if _has_join_path(graph, a, b):
+                    found_present = True
+                    break
+            if found_present:
+                break
+
+        if found_present:
+            logger.warning(
+                f"Information need '{info_desc}' reports missing relation {canon_entities} but entities are already join-connected - filtering out false positive"
+            )
+            continue
+
+        cleaned_missing_relations.append(MissingRelation(entities=canon_entities, description=mr_desc))
+
+    all_missing_count = (
+        len(cleaned_missing_entities)
+        + len(cleaned_missing_relations)
+        + len(cleaned_missing_intrinsic)
+        + len(cleaned_missing_derived)
+    )
+    satisfied = all_missing_count == 0
+    all_present = satisfied
+
+    return InformationCompletenessOutput(
+        information_need=info_desc,
+        all_present=all_present,
+        missing_relations=cleaned_missing_relations,
+        missing_entities=cleaned_missing_entities,
+        missing_intrinsic_attributes=cleaned_missing_intrinsic,
+        missing_derived_attributes=cleaned_missing_derived,
+        satisfied=satisfied,
+        reasoning=result.reasoning,
+    )
 
 
 @traceable_step("3.2", phase=3, tags=['phase_3_step_2'])
@@ -119,116 +485,29 @@ async def step_3_2_information_completeness_single(
     
     logger.debug(f"Checking completeness for information need: {info_desc}")
     
-    # Build comprehensive schema context
-    context_parts = []
-    if domain:
-        context_parts.append(f"Domain: {domain}")
+    context_msg = _build_rich_context(
+        info_desc=info_desc,
+        info_entities=info_entities,
+        entities=entities,
+        relations=relations,
+        attributes=attributes,
+        primary_keys=primary_keys,
+        domain=domain,
+        previous_check=previous_check,
+    )
     
-    # Information need details
-    context_parts.append(f"Information Need: {info_desc}")
-    if info_entities:
-        context_parts.append(f"Entities Involved: {', '.join(info_entities)}")
-    
-    # Entity details (only for involved entities)
-    # Note: attributes shown here are intrinsic attributes (after Step 2.14 cleanup)
-    entity_details = []
-    for entity_name in info_entities:
-        entity_obj = next(
-            (e for e in entities if (e.get("name") if isinstance(e, dict) else getattr(e, "name", "")) == entity_name),
-            None
-        )
-        if entity_obj:
-            entity_desc = entity_obj.get("description", "") if isinstance(entity_obj, dict) else getattr(entity_obj, "description", "")
-            entity_attrs = attributes.get(entity_name, [])
-            entity_pk = primary_keys.get(entity_name, [])
-            
-            entity_info = f"  {entity_name}:"
-            if entity_desc:
-                entity_info += f" {entity_desc}"
-            if entity_pk:
-                entity_info += f" (PK: {', '.join(entity_pk)})"
-            if entity_attrs:
-                attr_names = [extract_attribute_name(attr) for attr in entity_attrs]
-                entity_info += f" [Intrinsic Attributes: {', '.join(attr_names)}]"
-            else:
-                entity_info += " [Intrinsic Attributes: (none)]"
-            entity_details.append(entity_info)
-    
-    if entity_details:
-        context_parts.append(f"Entity Details (intrinsic attributes only - foreign keys handled automatically):\n" + "\n".join(entity_details))
-    
-    # Relations involving these entities
-    relevant_relations = []
-    for rel in relations:
-        rel_entities = rel.get("entities", [])
-        if any(e in rel_entities for e in info_entities):
-            rel_type = rel.get("type", "")
-            rel_desc = rel.get("description", "")
-            rel_info = f"  {rel_type}: {', '.join(rel_entities)}"
-            if rel_desc:
-                rel_info += f" ({rel_desc})"
-            relevant_relations.append(rel_info)
-    
-    if relevant_relations:
-        context_parts.append(f"Relevant Relations:\n" + "\n".join(relevant_relations))
-    
-    # Foreign keys involving these entities
-    relevant_fks = []
-    for fk in foreign_keys:
-        fk_from = fk.get("from_entity", "")
-        fk_to = fk.get("to_entity", "")
-        if fk_from in info_entities or fk_to in info_entities:
-            fk_attrs = fk.get("attributes", [])
-            fk_info = f"  {fk_from}.{', '.join(fk_attrs)} -> {fk_to}"
-            relevant_fks.append(fk_info)
-    
-    if relevant_fks:
-        context_parts.append(f"Relevant Foreign Keys:\n" + "\n".join(relevant_fks))
-    
-    # Previous check results (for loop iterations)
-    if previous_check:
-        prev_missing = []
-        prev_relations = previous_check.get("missing_relations", [])
-        prev_entities = previous_check.get("missing_entities", [])
-        prev_intrinsic_attrs = previous_check.get("missing_intrinsic_attributes", [])
-        prev_derived_attrs = previous_check.get("missing_derived_attributes", [])
-        # Legacy support for old format
-        prev_attrs = previous_check.get("missing_attributes", [])
-        
-        if prev_relations:
-            prev_missing.append(f"  Missing relations: {', '.join(prev_relations)}")
-        if prev_entities:
-            prev_missing.append(f"  Missing entities: {', '.join(prev_entities)}")
-        if prev_intrinsic_attrs:
-            attr_strs = [f"{attr.get('entity', '')}.{attr.get('attribute', '')}" for attr in prev_intrinsic_attrs]
-            prev_missing.append(f"  Missing intrinsic attributes: {', '.join(attr_strs)}")
-        if prev_derived_attrs:
-            attr_strs = [f"{attr.get('entity', '')}.{attr.get('attribute', '')}" for attr in prev_derived_attrs]
-            prev_missing.append(f"  Missing derived attributes: {', '.join(attr_strs)}")
-        # Legacy support
-        if prev_attrs and not prev_intrinsic_attrs:
-            attr_strs = [f"{attr.get('entity', '')}.{attr.get('attribute', '')}" for attr in prev_attrs]
-            prev_missing.append(f"  Missing attributes: {', '.join(attr_strs)}")
-        
-        if prev_missing:
-            context_parts.append(f"Previous Check Results:\n" + "\n".join(prev_missing))
-    
-    context_msg = "\n\nSchema Context:\n" + "\n".join(f"- {part}" for part in context_parts)
-    
-    # System prompt with enhanced instructions
+    # System prompt (NO tools; deterministic code will validate the output)
     system_prompt = """You are a database schema validation expert. Your task is to verify if all necessary components exist to answer a specific information need.
 
-**AVAILABLE TOOLS**: You have access to validation tools that you can use to verify your assessment:
-- check_schema_component_exists_bound(component_type: str, name: str) -> bool: Check if a schema component (entity, attribute, relation) exists
-- validate_attributes_exist_bound(entity: str, attributes: List[str]) -> Dict[str, bool]: Verify that attributes exist for an entity
+CRITICAL CONSTRAINTS:
+1) The output field information_need MUST exactly equal the provided information need string in context.
+2) You MUST NOT claim an entity or attribute is missing if it already appears in the provided context.
+3) missing_relations MUST be a list of objects with:
+   - entities: list of 2+ canonical entity names from context
+   - description: short description of the relation
+   Do NOT use free-form strings for missing_relations.
 
-**IMPORTANT**: Use these tools to verify your assessment before finalizing your response. For example:
-- Before reporting a missing entity, use check_schema_component_exists_bound("entity", "EntityName") to verify it doesn't exist
-- Before reporting missing attributes, use validate_attributes_exist_bound("EntityName", ["attr1", "attr2"]) to verify they don't exist
-
-This ensures accuracy and prevents false positives.
-
-**CRITICAL INSTRUCTIONS**: For this information need, check:
+For this information need, check:
 (a) Do all necessary entities and relations exist?
 (b) Are we missing any intrinsic attributes in entities related to this info?
 (c) Would adding any derived attributes make querying easier?
@@ -318,65 +597,19 @@ Return a JSON object with:
 Natural Language Description:
 {nl_description}
 
-**IMPORTANT**: For this information need, check:
-(a) Do all necessary entities and relations exist?
-(b) Are we missing any intrinsic attributes in entities related to this info?
-(c) Would adding any derived attributes make querying easier?
+IMPORTANT:
+- Do NOT list as missing anything that is already present in the context.
+- missing_intrinsic_attributes should ONLY include attributes not listed under the entity's Attributes in context.
+- missing_relations must be structured objects (entities list + description) using canonical entity names in the context.
+- CRITICAL: If a relation is listed under "Relations involving involved/connected entities" with "EXISTS:" prefix, that relation ALREADY EXISTS. Do NOT list it as missing, even if the entity order is different (e.g., "Trip, Rider" vs "Rider, Trip").
 
-**Note**: Foreign keys and relation-connecting attributes are NOT considered intrinsic attributes - they will be handled automatically. Focus on intrinsic attributes that describe the entities themselves.
-
-Return a JSON object specifying whether all components are present, what is missing (if anything), and whether you're satisfied."""
+Return JSON per schema."""
     
     try:
         # Get model for this step (important task)
         llm = get_model_for_step("3.2")
-        
-        # Build schema_state for tools
-        schema_state = {
-            "entities": entities,
-            "relations": relations,
-            "attributes": attributes,
-            "primary_keys": primary_keys,
-        }
-        
-        # Create bound versions of tools with schema_state
-        def check_schema_component_exists_bound(component_type: str, name: str) -> bool:
-            """Bound version of check_schema_component_exists with schema_state.
-            
-            Args:
-                component_type: Type of component ("entity", "attribute", "relation", "table", "column")
-                name: Name of the component to check
-                
-            Returns:
-                True if component exists, False otherwise
-                
-            Purpose: Allows LLM to verify that schema components exist before reporting them as missing.
-            """
-            # NOTE: check_schema_component_exists is a LangChain @tool (StructuredTool) and is not callable.
-            return _check_schema_component_exists_impl(component_type, name, schema_state)
-        
-        def validate_attributes_exist_bound(entity: str, attributes: List[str]) -> Dict[str, bool]:
-            """Bound version of validate_attributes_exist with schema_state.
-            
-            Args:
-                entity: Name of the entity to check
-                attributes: List of attribute names to verify
-                
-            Returns:
-                Dictionary mapping attribute name to existence status (True/False)
-                
-            Purpose: Allows LLM to verify that attributes exist for an entity before reporting them as missing.
-            """
-            # NOTE: validate_attributes_exist is a LangChain @tool (StructuredTool) and is not callable.
-            return _validate_attributes_exist_impl(entity, attributes, schema_state)
-        
-        # Create tools list
-        tools = [
-            check_schema_component_exists_bound,
-            validate_attributes_exist_bound,
-        ]
-        
-        # Invoke standardized LLM call with tools
+
+        # Invoke standardized LLM call WITHOUT tools (faster + deterministic validation)
         config = get_trace_config("3.2", phase=3, tags=["phase_3_step_2"])
         result: InformationCompletenessOutput = await standardized_llm_call(
             llm=llm,
@@ -387,82 +620,19 @@ Return a JSON object specifying whether all components are present, what is miss
                 "context": context_msg,
                 "nl_description": nl_description or "",
             },
-            tools=tools,
-            use_agent_executor=True,  # Use agent executor for tool calls
-            decouple_tools=True,  # Decouple tool calling from JSON generation
+            tools=None,
+            use_agent_executor=False,
+            decouple_tools=False,
             config=config,
         )
-        
-        # Work with Pydantic model directly
-        # Validate that mentioned entities exist
-        all_entity_names = {
-            e.get("name") if isinstance(e, dict) else getattr(e, "name", "")
-            for e in entities
-        }
-        
-        # Filter out false positives - entities that are reported as missing but actually exist
-        missing_entities = result.missing_entities
-        false_positives = []
-        valid_missing = []
-        for entity_name in missing_entities:
-            if entity_name in all_entity_names:
-                false_positives.append(entity_name)
-                logger.warning(
-                    f"Information need '{info_desc}' reports missing entity '{entity_name}' "
-                    f"but it exists in the schema - filtering out false positive"
-                )
-            else:
-                valid_missing.append(entity_name)
-        
-        # Validate missing_intrinsic_attributes and missing_derived_attributes entities exist
-        valid_intrinsic_attrs = []
-        invalid_intrinsic_attrs = []
-        for attr in result.missing_intrinsic_attributes:
-            attr_entity = attr.entity if isinstance(attr, MissingIntrinsicAttribute) else attr.get("entity", "")
-            if attr_entity in all_entity_names:
-                valid_intrinsic_attrs.append(attr)
-            else:
-                invalid_intrinsic_attrs.append(attr_entity)
-                logger.warning(
-                    f"Information need '{info_desc}' reports missing intrinsic attribute for entity '{attr_entity}' "
-                    f"but entity doesn't exist - filtering out"
-                )
-        
-        valid_derived_attrs = []
-        invalid_derived_attrs = []
-        for attr in result.missing_derived_attributes:
-            attr_entity = attr.entity if isinstance(attr, MissingDerivedAttribute) else attr.get("entity", "")
-            if attr_entity in all_entity_names:
-                valid_derived_attrs.append(attr)
-            else:
-                invalid_derived_attrs.append(attr_entity)
-                logger.warning(
-                    f"Information need '{info_desc}' reports missing derived attribute for entity '{attr_entity}' "
-                    f"but entity doesn't exist - filtering out"
-                )
-        
-        # Update the result with filtered missing entities and attributes (create new model instance)
-        if false_positives or invalid_intrinsic_attrs or invalid_derived_attrs:
-            result = InformationCompletenessOutput(
-                information_need=info_desc,
-                all_present=result.all_present,
-                missing_relations=result.missing_relations,
-                missing_entities=valid_missing,
-                missing_intrinsic_attributes=valid_intrinsic_attrs,
-                missing_derived_attributes=valid_derived_attrs,
-                satisfied=result.satisfied if (valid_missing or valid_intrinsic_attrs or valid_derived_attrs) else True,
-                reasoning=result.reasoning
-            )
-            if false_positives and not valid_missing and not valid_intrinsic_attrs and not valid_derived_attrs:
-                logger.info(
-                    f"Information need '{info_desc}': All reported missing components were false positives. "
-                    f"Marking as satisfied."
-                )
-        
-        logger.debug(
-            f"Completeness check for '{info_desc}': "
-            f"all_present={result.all_present}, "
-            f"satisfied={result.satisfied}"
+
+        # Deterministic cleanup: remove false positives and enforce schema invariants
+        result = _apply_deterministic_cleanup(
+            info_desc=info_desc,
+            entities=entities,
+            relations=relations,
+            attributes=attributes,
+            result=result,
         )
         
         # Convert to dict only at return boundary

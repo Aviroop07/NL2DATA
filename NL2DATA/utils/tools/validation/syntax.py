@@ -4,6 +4,8 @@ from typing import Dict, Any, Optional
 from langchain_core.tools import tool
 from langchain_core.tools.base import ToolException
 
+from NL2DATA.utils.dsl.validator import validate_dsl_expression_strict
+
 
 @tool
 def validate_sql_syntax(sql: str) -> Dict[str, Any]:
@@ -114,20 +116,9 @@ def _validate_dsl_expression_impl(dsl: str, grammar: Optional[str] = None) -> Di
     Returns:
         Dictionary with 'valid' (bool) and 'error' (str, if invalid) keys
     """
-    dsl = dsl.strip()
-    
-    if not dsl:
-        return {"valid": False, "error": "DSL expression is empty"}
-    
-    # Basic validation - check for balanced parentheses and brackets
-    if dsl.count("(") != dsl.count(")"):
-        return {"valid": False, "error": "Unbalanced parentheses"}
-    
-    if dsl.count("[") != dsl.count("]"):
-        return {"valid": False, "error": "Unbalanced brackets"}
-    
-    # In production, should parse against actual DSL grammar
-    return {"valid": True, "error": None}
+    # Formal grammar validation (deterministic).
+    # `grammar` is reserved for future use; currently we validate against NL2DATA's built-in grammar.
+    return validate_dsl_expression_strict(dsl)
 
 
 @tool

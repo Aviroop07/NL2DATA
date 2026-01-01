@@ -8,8 +8,15 @@
 **/logs/
 **/logs/**
 
+# Generated outputs / run artifacts
+NL2DATA/tests/output/
+NL2DATA/tests/output/**
+NL2DATA/runs/
+NL2DATA/runs/**
+
 # Markdown (user request: do not push any .md files)
 *.md
+!README.md
 
 
 # ----------------------------

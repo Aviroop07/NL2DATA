@@ -167,7 +167,8 @@ def build_relation_list_string(
     lines = []
     for relation in relations:
         entities_in_rel = relation.get("entities", [])
-        rel_type = relation.get("type", "unknown")
+        # `type` may be an Enum in some flows; always render as string.
+        rel_type = str(relation.get("type", "unknown"))
         rel_desc = relation.get("description", "")
         
         if entities_in_rel:

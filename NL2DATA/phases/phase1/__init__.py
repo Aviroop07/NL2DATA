@@ -9,6 +9,7 @@ from .step_1_5_relation_mention_detection import step_1_5_relation_mention_detec
 from .step_1_6_auxiliary_entity_suggestion import step_1_6_auxiliary_entity_suggestion
 from .step_1_7_entity_consolidation import step_1_7_entity_consolidation
 from .step_1_75_entity_relation_reclassification import step_1_75_entity_relation_reclassification
+from .step_1_76_entity_attribute_guardrail import step_1_76_entity_attribute_guardrail
 from .step_1_8_entity_cardinality import step_1_8_entity_cardinality, step_1_8_entity_cardinality_single
 from .step_1_9_key_relations_extraction import step_1_9_key_relations_extraction
 from .step_1_10_schema_connectivity import (
@@ -31,6 +32,7 @@ __all__ = [
     "step_1_6_auxiliary_entity_suggestion",
     "step_1_7_entity_consolidation",
     "step_1_75_entity_relation_reclassification",
+    "step_1_76_entity_attribute_guardrail",
     "step_1_8_entity_cardinality",
     "step_1_8_entity_cardinality_single",
     "step_1_9_key_relations_extraction",

@@ -62,7 +62,7 @@ class StandardizedLLMCall:
         tools: Optional[List[Any]] = None,
         use_agent_executor: bool = False,
         decouple_tools: bool = False,
-        max_retries: int = 3,
+        max_retries: int = 5,
         agent_max_iterations: int = 20,
     ):
         """
@@ -339,67 +339,32 @@ class StandardizedLLMCall:
         except NoneFieldError as e:
             raise  # Re-raise to trigger retry with feedback
         
-        # Log to pipeline logger if available
-        if PIPELINE_LOGGER_AVAILABLE:
-            try:
-                pipeline_logger = get_pipeline_logger()
-                if pipeline_logger.file_handle:
-                    # Try to get actual messages that were sent
-                    messages_sent = None
-                    raw_response = None
-                    
-                    # For standard chains, try to render the prompt template to get actual messages
-                    if not self.use_agent_executor and hasattr(self, 'chain'):
-                        try:
-                            from langchain_core.prompts import ChatPromptTemplate
-                            from langchain_core.messages import SystemMessage, HumanMessage
-                            
-                            # Create prompt template and render it
-                            enhanced_human_template = self.human_prompt_template
-                            if "{error_feedback}" not in enhanced_human_template:
-                                enhanced_human_template = f"{enhanced_human_template}\n\n{{error_feedback}}"
-                            
-                            prompt_template = ChatPromptTemplate.from_messages([
-                                ("system", self.system_prompt),
-                                ("human", enhanced_human_template),
-                            ])
-                            
-                            # Render with actual input data
-                            rendered_messages = prompt_template.format_messages(**input_data)
-                            messages_sent = rendered_messages
-                        except Exception as e:
-                            logger.debug(f"Could not render prompt template for logging: {e}")
-                            # Fallback to string format
-                            try:
-                                formatted_prompt = self.human_prompt_template.format(**input_data)
-                                full_prompt = f"{self.system_prompt}\n\n{formatted_prompt}"
-                            except:
-                                full_prompt = f"{self.system_prompt}\n\n{self.human_prompt_template}"
-                    
-                    # Extract LLM parameters
-                    llm_params = {}
-                    try:
-                        llm_params = {
-                            "model": getattr(self.llm, 'model_name', None) or getattr(self.llm, 'model', None),
-                            "temperature": getattr(self.llm, 'temperature', None),
-                            "max_tokens": getattr(self.llm, 'max_tokens', None),
-                            "timeout": getattr(self.llm, 'timeout', None),
-                        }
-                    except Exception as e:
-                        logger.debug(f"Could not extract LLM parameters: {e}")
-                    
-                    pipeline_logger.log_llm_call(
-                        step_name=step_type or f"{self.output_schema.__name__}",
-                        prompt=None if messages_sent else (full_prompt if 'full_prompt' in locals() else None),
-                        input_data=input_data,
-                        response=result,
-                        messages_sent=messages_sent,
-                        raw_response=raw_response,
-                        llm_params=llm_params if llm_params else None,
-                    )
-            except Exception as log_error:
-                # Don't fail the call if logging fails
-                logger.debug(f"Failed to log to pipeline logger: {log_error}")
+        # Note: Detailed logging (messages + response) is now handled in chain_utils.py
+        # after the chain invocation completes, so we don't duplicate it here.
+        # We only log a summary to the regular logger.
+        
+        # Log summary to regular logger for easier debugging
+        try:
+            result_summary = "N/A"
+            if hasattr(result, 'model_dump'):
+                result_dict = result.model_dump()
+                # Show a brief summary (first few keys/values)
+                if isinstance(result_dict, dict):
+                    keys = list(result_dict.keys())[:5]
+                    result_summary = f"Keys: {keys}" + (f" (+{len(result_dict)-5} more)" if len(result_dict) > 5 else "")
+            elif isinstance(result, dict):
+                keys = list(result.keys())[:5]
+                result_summary = f"Keys: {keys}" + (f" (+{len(result)-5} more)" if len(result) > 5 else "")
+            else:
+                result_summary = str(result)[:200]
+            
+            logger.info(
+                f"LLM Call Completed: {step_type or self.output_schema.__name__} -> "
+                f"Response Type: {type(result).__name__}, "
+                f"Summary: {result_summary}"
+            )
+        except Exception as summary_error:
+            logger.debug(f"Could not create result summary: {summary_error}")
         
         return result
 
@@ -413,7 +378,7 @@ async def standardized_llm_call(
     tools: Optional[List[Any]] = None,
     use_agent_executor: bool = False,
     decouple_tools: bool = False,
-    max_retries: int = 3,
+    max_retries: int = 5,
     agent_max_iterations: int = 20,
     config: Optional[RunnableConfig] = None,
     step_type: Optional[str] = None,

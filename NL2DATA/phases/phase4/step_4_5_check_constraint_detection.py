@@ -11,6 +11,7 @@ from NL2DATA.phases.phase4.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase4_config
 from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_attribute_name,
     extract_attribute_description,
@@ -71,6 +72,20 @@ async def step_4_5_check_constraint_detection(
         True
     """
     logger.debug(f"Detecting CHECK constraint for {entity_name}.{categorical_attribute}")
+    cfg = get_phase4_config()
+
+    # Deterministic guardrail: never generate CHECK constraints for numeric *_id columns.
+    # These should be enforced via FK relationships, not enumerated CHECK lists.
+    cat_lower = (categorical_attribute or "").strip().lower()
+    sql_type_upper = (attribute_type or "").strip().upper()
+    if cat_lower.endswith("_id") and sql_type_upper in {"INT", "INTEGER", "BIGINT", "SMALLINT"}:
+        return {
+            "check_constraint_attributes": [],
+            "check_constraint_definitions": {},
+            "reasoning": {
+                categorical_attribute: "IDs (numeric *_id) should not use CHECK constraints; enforce validity via foreign keys."
+            },
+        }
     
     # Build context
     context_parts = []
@@ -124,15 +139,25 @@ If the attribute should NOT have a CHECK constraint, return empty lists and empt
 
 {context}
 
-Natural Language Description:
-{nl_description}
+Return a JSON object indicating whether this attribute should have a CHECK constraint, what values should be allowed, and reasoning.
 
-Return a JSON object indicating whether this attribute should have a CHECK constraint, what values should be allowed, and reasoning."""
+IMPORTANT:
+- Decide based on the attribute and its SQL type only.
+- Do NOT use the original NL description here."""
 
     # Initialize model and create chain
     llm = get_model_for_step("4.5")  # Step 4.5 maps to "high_fanout" task type
     try:
         config = get_trace_config("4.5", phase=4, tags=["phase_4_step_5"])
+        # Deterministic fast-exit: do not emit CHECK constraints for numeric foreign keys / *_id columns.
+        # Those are identifiers; enforcing "allowed values" as CHECK is almost always wrong.
+        if (categorical_attribute or "").lower().endswith("_id") and (attribute_type or "").strip():
+            return {
+                "check_constraint_attributes": [],
+                "check_constraint_definitions": {},
+                "reasoning": {},
+            }
+
         result: CheckConstraintDetectionOutput = await standardized_llm_call(
             llm=llm,
             output_schema=CheckConstraintDetectionOutput,
@@ -142,7 +167,7 @@ Return a JSON object indicating whether this attribute should have a CHECK const
                 "entity_name": entity_name,
                 "categorical_attribute": categorical_attribute,
                 "context": context_msg,
-                "nl_description": nl_description or "",
+                "nl_section": "",
             },
             config=config,
         )

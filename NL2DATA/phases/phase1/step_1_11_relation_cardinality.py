@@ -24,15 +24,36 @@ logger = get_logger(__name__)
 
 class RelationCardinalityOutput(BaseModel):
     """Output structure for relation cardinality and participation."""
+    # NOTE: These are intentionally REQUIRED (no defaults).
+    # If the LLM omits them, we want schema validation to fail loudly rather than quietly
+    # accepting {} and only failing later during deterministic completeness checks.
     entity_cardinalities: Dict[str, Literal["1", "N"]] = Field(
-        default_factory=dict,
-        description="Dictionary mapping entity names to their cardinality in the relation ('1' for one, 'N' for many)"
+        ...,
+        description="Dictionary mapping entity names to their cardinality in the relation ('1' for one, 'N' for many). Keys MUST match the entity names exactly."
     )
     entity_participations: Dict[str, Literal["total", "partial"]] = Field(
-        default_factory=dict,
-        description="Dictionary mapping entity names to their participation type ('total' means every instance must participate, 'partial' means some instances may not participate)"
+        ...,
+        description="Dictionary mapping entity names to their participation type ('total' means every instance must participate, 'partial' means some instances may not participate). Keys MUST match the entity names exactly."
     )
     reasoning: str = Field(description="Reasoning for the cardinality and participation decisions")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RelationCardinalityOutputLoose(BaseModel):
+    """
+    Loose output structure used ONLY for parsing LLM responses.
+
+    Rationale:
+    - Small/fast models occasionally omit required fields even at temperature=0.
+    - If we parse with the strict schema, parsing fails inside standardized_llm_call and we lose
+      the ability to run our own deterministic validator + targeted repair prompts.
+
+    We therefore parse loosely, then enforce completeness/allowed values deterministically.
+    """
+    entity_cardinalities: Optional[Dict[str, Any]] = None
+    entity_participations: Optional[Dict[str, Any]] = None
+    reasoning: Optional[str] = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -70,6 +91,71 @@ def _entity_name_variants(entity_name: str) -> List[str]:
         if not v.endswith("s"):
             variants.add(v + "s")
     return sorted(variants)
+
+
+def _build_variant_to_canonical_map(entities: List[str]) -> Dict[str, str]:
+    """
+    Build a lookup of normalized variant -> canonical entity name.
+
+    Purpose:
+    - Step 1.11 validation requires keys that exactly match entity names.
+    - LLMs frequently return keys in lowercase/snake_case/plural forms.
+    - We deterministically remap such keys back to canonical entity names.
+    """
+    out: Dict[str, str] = {}
+    for e in (entities or []):
+        canonical = str(e).strip()
+        if not canonical:
+            continue
+        for v in _entity_name_variants(canonical):
+            vv = str(v).strip().lower()
+            if not vv:
+                continue
+            # Prefer first mapping in case of collisions (rare but possible)
+            out.setdefault(vv, canonical)
+        # Also map exact canonical lowercased
+        out.setdefault(canonical.strip().lower(), canonical)
+    return out
+
+
+def _canonicalize_llm_constraint_dicts(
+    *,
+    entities: List[str],
+    entity_cardinalities: Dict[str, Any],
+    entity_participations: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Canonicalize LLM output dict keys to match exact entity names.
+
+    This addresses the common failure mode where the LLM returns keys like:
+    - "session" vs "Session"
+    - "sensor_reading" vs "SensorReading"
+    - pluralized keys like "orders" vs "Order"
+
+    Strategy:
+    - For each incoming key, normalize (strip + lower) and map via variants -> canonical.
+    - Keep only keys that map to participating entities (prevents accidental leakage).
+    - If multiple keys map to same canonical, keep the first.
+    """
+    variant_to_canonical = _build_variant_to_canonical_map(entities)
+
+    canon_cards: Dict[str, Any] = {}
+    for k, v in (entity_cardinalities or {}).items():
+        kk = str(k).strip().lower()
+        canonical = variant_to_canonical.get(kk)
+        if not canonical:
+            continue
+        canon_cards.setdefault(canonical, v)
+
+    canon_parts: Dict[str, Any] = {}
+    for k, v in (entity_participations or {}).items():
+        kk = str(k).strip().lower()
+        canonical = variant_to_canonical.get(kk)
+        if not canonical:
+            continue
+        canon_parts.setdefault(canonical, v)
+
+    return canon_cards, canon_parts
 
 
 def _infer_cardinalities_from_text(
@@ -110,6 +196,9 @@ def _infer_cardinalities_from_text(
     if rel_type_norm == "one-to-one":
         return {e: "1" for e in ents}
     if rel_type_norm == "many-to-many":
+        return {e: "N" for e in ents}
+    if rel_type_norm == "ternary":
+        # For n-ary relations, default to N to avoid under-constraining
         return {e: "N" for e in ents}
 
     # Helpers used for binary inference (even when rel_type is unknown).
@@ -172,9 +261,11 @@ def _infer_cardinalities_from_text(
         if matches_each_x_one_y(b_vars, a_vars) or matches_y_has_many_x(a_vars, b_vars):
             return {a: "1", b: "N"}
 
-        # Type-based default direction if rel_type suggests it
+        # Type-based default direction if rel_type suggests it's a 1:N family.
+        # We do not assume entity ordering is directional, so when we must choose,
+        # default to [many, one] as a conservative FK-like assumption.
         if rel_type_norm in {"one-to-many", "many-to-one"}:
-            return {a: "N", b: "1"}  # assume list is [many, one]
+            return {a: "N", b: "1"}
 
         # Name/description-based guess (useful when rel_type is a free-text predicate like "deployed across")
         a_score = score_manyness(a)
@@ -377,6 +468,14 @@ Important:
 - For ternary or n-ary relations, determine cardinality and participation for each entity independently
 - Provide clear reasoning for your decisions, especially explaining why it's many-to-one vs one-to-one
 
+STRICT OUTPUT KEYING (CRITICAL):
+- You MUST use the EXACT entity names provided in "Relation: Entities" as the ONLY keys in BOTH dictionaries.
+- Keys are case-sensitive and must match exactly (CamelCase included).
+- Do NOT use lowercase keys, snake_case keys, pluralized keys, or synonyms.
+- Include ALL entities from the relation in BOTH dictionaries (no omissions, no extras).
+- If you omit any required field (entity_cardinalities / entity_participations / reasoning), the response will be rejected.
+- Even if you are uncertain, you MUST still output complete dictionaries with your best-guess values.
+
 CRITICAL: You MUST return ONLY valid JSON. Do NOT include any markdown formatting, explanations, or text outside the JSON object.
 
 You have access to validation tools:
@@ -395,6 +494,10 @@ Example JSON output (NO markdown, NO text before/after):
     # Note: Use format() placeholders for template variables, not f-string
     # to avoid conflicts with entity names that might contain special characters
     entities_str = ", ".join(entities_in_rel)
+    # Provide an explicit JSON skeleton with exact keys to maximize model compliance.
+    # Values are placeholders; the model must replace them with correct values.
+    skeleton_cards = ", ".join([f"\"{e}\": \"1\"" for e in entities_in_rel])
+    skeleton_parts = ", ".join([f"\"{e}\": \"partial\"" for e in entities_in_rel])
     human_prompt = """Relation:
 - Entities: {entities_str}
 - Type: {rel_type}
@@ -404,10 +507,19 @@ Entity details:
 {{entity_context}}
 
 Original description (if available):
-{{nl_description}}""".format(
+{{nl_description}}
+
+REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
+{{
+  "entity_cardinalities": {{{skeleton_cards}}},
+  "entity_participations": {{{skeleton_parts}}},
+  "reasoning": "explain your decisions"
+}}""".format(
         entities_str=entities_str,
         rel_type=rel_type,
         rel_description=rel_description or "No description",
+        skeleton_cards=skeleton_cards,
+        skeleton_parts=skeleton_parts,
     )
     
     # Initialize model
@@ -423,7 +535,7 @@ Original description (if available):
         ]
     )
 
-    async def _call_llm(prompt_human: str) -> RelationCardinalityOutput:
+    async def _call_llm(prompt_human: str) -> RelationCardinalityOutputLoose:
         config = get_trace_config(
             "1.11",
             phase=1,
@@ -432,7 +544,7 @@ Original description (if available):
         )
         return await standardized_llm_call(
             llm=llm,
-            output_schema=RelationCardinalityOutput,
+            output_schema=RelationCardinalityOutputLoose,
             system_prompt=system_prompt
             + "\n\nIMPORTANT: You MUST provide entries for ALL entities listed in the relation. Do not omit any entity.",
             human_prompt_template=prompt_human,
@@ -446,11 +558,19 @@ Original description (if available):
         )
     
     try:
-        result: RelationCardinalityOutput = await _call_llm(human_prompt)
+        result: RelationCardinalityOutputLoose = await _call_llm(human_prompt)
         
-        # Work with Pydantic model directly
-        cardinalities = result.entity_cardinalities
-        participations = result.entity_participations
+        # Extract raw (loose) payload
+        cardinalities = result.entity_cardinalities or {}
+        participations = result.entity_participations or {}
+        reasoning = result.reasoning or ""
+
+        # Canonicalize keys (LLMs often return lowercase/snake_case variants).
+        cardinalities, participations = _canonicalize_llm_constraint_dicts(
+            entities=entities_in_rel,
+            entity_cardinalities=cardinalities,
+            entity_participations=participations,
+        )
 
         # Deterministic post-validation (replaces tool-calling)
         check = _validate_relation_cardinality_output_impl(
@@ -466,9 +586,15 @@ Original description (if available):
                 + (check.get("error") or "Unknown validation error")
                 + "\n\nReturn corrected JSON with complete dictionaries for ALL entities."
             )
-            repaired: RelationCardinalityOutput = await _call_llm(repair_prompt)
-            cardinalities = repaired.entity_cardinalities
-            participations = repaired.entity_participations
+            repaired: RelationCardinalityOutputLoose = await _call_llm(repair_prompt)
+            cardinalities = (repaired.entity_cardinalities or {})
+            participations = (repaired.entity_participations or {})
+            reasoning = repaired.reasoning or reasoning
+            cardinalities, participations = _canonicalize_llm_constraint_dicts(
+                entities=entities_in_rel,
+                entity_cardinalities=cardinalities,
+                entity_participations=participations,
+            )
             check2 = _validate_relation_cardinality_output_impl(
                 entities=entities_in_rel,
                 entity_cardinalities=cardinalities,
@@ -478,7 +604,7 @@ Original description (if available):
                 return {
                     "entity_cardinalities": cardinalities,
                     "entity_participations": participations,
-                    "reasoning": repaired.reasoning,
+                    "reasoning": reasoning,
                 }
 
             # Final deterministic fallback (no exception; keep pipeline stable).
@@ -512,7 +638,11 @@ Original description (if available):
         )
         
         # Convert to dict only at return boundary
-        return result.model_dump()
+        return {
+            "entity_cardinalities": cardinalities,
+            "entity_participations": participations,
+            "reasoning": reasoning,
+        }
         
     except Exception as e:
         # Never fail Phase 1 due to unstable cardinality inference. Use deterministic fallback.

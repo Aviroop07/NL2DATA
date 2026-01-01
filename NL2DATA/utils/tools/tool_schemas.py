@@ -13,7 +13,7 @@ class VerifyEntitiesExistArgs(BaseModel):
     
     IMPORTANT: When calling this tool, provide arguments as a JSON object:
     {"entities": ["Customer", "Order"]}
-    NOT as a list: ["entities"] ❌
+    NOT as a list: ["entities"] (WRONG)
     """
     entities: List[str] = Field(
         ...,
@@ -104,7 +104,7 @@ class ValidateDSLExpressionArgs(BaseModel):
         ...,
         description="DSL expression to validate. Must be a valid DSL expression string. "
                    "When calling this tool, provide as a JSON object: {'dsl': 'amount > 0'}",
-        examples=["amount > 0", "fraud ~ Bernoulli(0.05)", "timestamp ~ Seasonal(month_day=[1,15])"]
+        examples=["amount > 0", "flag ~ Bernoulli(0.05)", "amount ~ LogNormal(3.5, 1.2)"]
     )
 
 
@@ -114,7 +114,7 @@ class ValidateDSLExpressionBoundArgs(BaseModel):
         ...,
         description="DSL expression to validate. Must be a valid DSL expression string. "
                    "When calling this tool, provide as a JSON object: {'dsl': 'amount > 0'}",
-        examples=["amount > 0", "fraud ~ Bernoulli(0.05)", "timestamp ~ Seasonal(month_day=[1,15])"]
+        examples=["amount > 0", "flag ~ Bernoulli(0.05)", "amount ~ LogNormal(3.5, 1.2)"]
     )
 
 

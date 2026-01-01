@@ -72,6 +72,11 @@ from .connectivity import (
     validate_cardinality_consistency,
 )
 
+# Relation-level validation
+from .relations import (
+    _dedupe_relations_by_constraints_impl,
+)
+
 # Query validation
 from .query import (
     _validate_query_against_schema_impl,
@@ -139,6 +144,8 @@ __all__ = [
     "check_entity_connectivity",
     "detect_circular_dependencies",
     "validate_cardinality_consistency",
+    # Relation-level validation
+    "_dedupe_relations_by_constraints_impl",
     # Query validation (impl functions)
     "_validate_query_against_schema_impl",
     # Query validation (tool functions)

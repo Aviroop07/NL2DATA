@@ -124,21 +124,6 @@ def step_3_4_er_design_compilation(
         "attributes": compiled_attributes,
     }
     
-    # Log the complete ER design
-    logger.info("=== ER DESIGN (Step 3.4 Output) ===")
-    logger.info(json.dumps(er_design, indent=2, default=str))
-    logger.info("=== END ER DESIGN ===")
-    
-    # Log to pipeline logger if available
-    if PIPELINE_LOGGER_AVAILABLE:
-        try:
-            pipeline_logger = get_pipeline_logger()
-            if pipeline_logger.file_handle:
-                pipeline_logger.log_er_diagram("Phase 3.4: ER Design Compilation", er_design)
-        except Exception as log_error:
-            # Don't fail the function if logging fails
-            logger.debug(f"Failed to log ER design to pipeline logger: {log_error}")
-    
     return er_design
 
 

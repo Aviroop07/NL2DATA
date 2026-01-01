@@ -204,6 +204,7 @@ async def step_3_3_phase2_reexecution(
     
     new_attributes = {}
     new_derived_attributes = {}
+    new_derived_metrics = {}
     updated_primary_keys = {}
     updated_constraints = {}
     
@@ -272,7 +273,10 @@ async def step_3_3_phase2_reexecution(
             existing_attrs = attributes.get(entity_name, [])
             new_intrinsic = new_attributes.get(entity_name, [])
             all_attrs = existing_attrs + new_intrinsic
-            entity_attributes_for_derived[entity_name] = [extract_attribute_name(attr) for attr in all_attrs]
+            # IMPORTANT: Step 2.9 currently requires the derived attribute itself to be present in the attribute list.
+            # Include the derived attribute names so formula extraction can proceed.
+            base_attr_names = [extract_attribute_name(attr) for attr in all_attrs]
+            entity_attributes_for_derived[entity_name] = sorted(set(base_attr_names + [a for a in derived_attr_names if a]))
             
             # Build derivation_rules from derivation_hint
             entity_derivation_rules = {}
@@ -311,7 +315,28 @@ async def step_3_3_phase2_reexecution(
         for entity_name, derived_formulas in derived_formulas_by_entity.items():
             if entity_name in entities_needing_derived:
                 derived_attrs_list = []
+                metrics_list = []
                 for attr_name, formula_info in derived_formulas.items():
+                    if isinstance(formula_info, dict) and bool(formula_info.get("is_aggregate_metric", False)):
+                        metrics_list.append(
+                            {
+                                "name": attr_name,
+                                "description": f"Derived metric: {formula_info.get('reasoning', '')}",
+                                "is_metric": True,
+                                "derivation_formula": formula_info.get("formula", ""),
+                                "derivation_expression_type": formula_info.get("expression_type", "other"),
+                                "derivation_dependencies": formula_info.get("dependencies", []),
+                            }
+                        )
+                        continue
+                    # Do not add derived attributes without valid, non-empty formulas.
+                    if not isinstance(formula_info, dict):
+                        continue
+                    if (formula_info.get("validation_errors") or []) and isinstance(formula_info.get("validation_errors"), list):
+                        continue
+                    formula_str = str(formula_info.get("formula", "") or "").strip()
+                    if not formula_str:
+                        continue
                     # Create derived attribute dict
                     derived_attr = {
                         "name": attr_name,
@@ -326,6 +351,9 @@ async def step_3_3_phase2_reexecution(
                 if derived_attrs_list:
                     new_derived_attributes[entity_name] = derived_attrs_list
                     logger.info(f"Added {len(derived_attrs_list)} derived attributes to {entity_name}")
+                if metrics_list:
+                    new_derived_metrics[entity_name] = metrics_list
+                    logger.info(f"Stored {len(metrics_list)} derived metrics for {entity_name} (not added to ER attributes)")
     
     # Step 3: Re-run primary key identification if needed
     # (Only if entity doesn't have a primary key yet)
@@ -382,6 +410,7 @@ async def step_3_3_phase2_reexecution(
     return {
         "new_attributes": new_attributes,
         "new_derived_attributes": new_derived_attributes,
+        "new_derived_metrics": new_derived_metrics,
         "updated_primary_keys": updated_primary_keys,
         "updated_constraints": updated_constraints,
         "summary": summary

@@ -46,7 +46,10 @@ def log_json(logger: Any, title: str, payload: Any) -> None:
         return
 
     logger.info("DEBUG_DUMP BEGIN: %s", title)
-    logger.info("%s", json.dumps(payload, indent=2, ensure_ascii=False, default=_default_json))
+    # IMPORTANT (Windows console safety):
+    # Some terminals use cp1252 and will crash on Unicode characters (e.g., arrows, ≥, ≈, non-breaking hyphens).
+    # We keep the dump fully untruncated but force ASCII-safe escaping so logging never crashes.
+    logger.info("%s", json.dumps(payload, indent=2, ensure_ascii=True, default=_default_json))
     logger.info("DEBUG_DUMP END: %s", title)
 
 

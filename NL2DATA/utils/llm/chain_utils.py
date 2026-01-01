@@ -1,13 +1,20 @@
-"""Utility functions for creating LangChain chains with best practices."""
+"""Utility functions for creating LangChain chains with best practices.
+
+Project standard (Phase 1 -> Phase 2):
+- Keep system prompts as-is.
+- Split large user context into multiple user messages for readability and better compliance.
+"""
 
 from typing import TypeVar, Type, Optional, Any, Dict, List
 from pydantic import BaseModel, ValidationError
 
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.exceptions import OutputParserException
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from langchain_core.prompt_values import ChatPromptValue
 
 # Try to import RunnableRetry (may not be available in all langchain versions)
 try:
@@ -40,6 +47,95 @@ class InvalidResponseFormatSchemaError(Exception):
     """Raised when OpenAI rejects the JSON schema passed via response_format."""
 
 
+def _split_user_content_into_chunks(text: str, *, max_chars: int = 1800, max_messages: int = 8) -> List[str]:
+    """
+    Split a single large user message into multiple chunks.
+
+    Heuristic goals:
+    - Prefer splitting on blank lines to keep "key things" separate.
+    - Do not create too many messages (cap).
+    - Keep messages reasonably sized to reduce truncation risk and improve instruction salience.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    # Split by blank lines into paragraphs.
+    paragraphs = [p.strip() for p in raw.replace("\r\n", "\n").split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1:
+        return [raw]
+
+    def _looks_like_new_section(p: str) -> bool:
+        low = p.lower()
+        return (
+            low.startswith("natural language description:")
+            or low.startswith("description:")
+            or low.startswith("entity:")
+            or low.startswith("domain:")
+            or low.startswith("prior_context:")
+            or low.startswith("explicit_entities")
+            or low.startswith("knownentities")
+            or low.startswith("relations")
+            or low.startswith("connected entities")
+            or low.startswith("detected cross-entity issues")
+            or low.startswith("validation issues")
+            or low.startswith("attributes to check")
+            or low.startswith("allowed attribute names")
+            or low.startswith("current attributes")
+            or low.startswith("return ")
+        )
+
+    chunks: List[str] = []
+    buf: List[str] = []
+
+    for p in paragraphs:
+        candidate = ("\n\n".join(buf + [p])).strip() if buf else p
+        if buf and (_looks_like_new_section(p) or len(candidate) > max_chars):
+            chunks.append("\n\n".join(buf).strip())
+            buf = [p]
+        else:
+            buf.append(p)
+
+    if buf:
+        chunks.append("\n\n".join(buf).strip())
+
+    # Cap number of messages (merge tail).
+    if len(chunks) > max_messages:
+        head = chunks[: max_messages - 1]
+        tail = "\n\n".join(chunks[max_messages - 1 :]).strip()
+        chunks = head + ([tail] if tail else [])
+
+    return [c for c in chunks if c.strip()]
+
+
+def _split_prompt_messages(messages: Any) -> List[Any]:
+    """
+    Transform formatted prompt messages by splitting HumanMessage content into multiple HumanMessage objects.
+    System messages are kept unchanged.
+    """
+    # ChatPromptTemplate produces a ChatPromptValue; unwrap it.
+    if isinstance(messages, ChatPromptValue):
+        messages = messages.messages
+    # Defensive: some runnables may pass {"messages": [...]}.
+    if isinstance(messages, dict) and "messages" in messages:
+        messages = messages.get("messages")
+
+    out: List[Any] = []
+    for m in (messages or []):
+        # Only split user/human messages
+        if isinstance(m, HumanMessage):
+            parts = _split_user_content_into_chunks(m.content)
+            if not parts:
+                continue
+            if len(parts) == 1:
+                out.append(m)
+            else:
+                out.extend([HumanMessage(content=p) for p in parts])
+        else:
+            out.append(m)
+    return out
+
+
 def _is_invalid_response_format_schema_error(err: Exception) -> bool:
     """Heuristic detector for OpenAI 'invalid_json_schema' / response_format schema rejection."""
     msg = str(err)
@@ -63,7 +159,7 @@ def create_structured_chain(
     auto_fix_prompts: bool = True,
     tools: Optional[List[Any]] = None,
     enable_retry: bool = True,
-    max_retries: int = 3,
+    max_retries: int = 5,
 ) -> Runnable:
     """
     Create a LangChain chain with structured output following best practices.
@@ -151,6 +247,10 @@ def create_structured_chain(
         tools_bound = True
         logger.debug(f"Bound {len(tools)} tools to LLM")
     
+    # Insert a standard message-splitting step:
+    # system prompt stays as-is; user/human context gets split into multiple user messages.
+    split_messages_runnable = RunnableLambda(_split_prompt_messages)
+
     # Use with_structured_output (preferred method for OpenAI models)
     # Note: We can't directly customize the JSON schema that with_structured_output uses,
     # but Pydantic v2's model_json_schema() should handle additionalProperties correctly.
@@ -159,7 +259,7 @@ def create_structured_chain(
     if not use_parser:
         try:
             structured_llm = llm.with_structured_output(output_schema)
-            chain = prompt | structured_llm
+            chain = prompt | split_messages_runnable | structured_llm
             logger.debug(f"Created chain using with_structured_output for {output_schema.__name__}")
             if tools_bound:
                 logger.warning(
@@ -178,7 +278,7 @@ def create_structured_chain(
     # Fallback: Use PydanticOutputParser
     if use_parser or chain is None:
         parser = PydanticOutputParser(pydantic_object=output_schema)
-        chain = prompt | llm | parser
+        chain = prompt | split_messages_runnable | llm | parser
         logger.debug(f"Created chain using PydanticOutputParser for {output_schema.__name__}")
     
     # Wrap with RunnableRetry if enabled and available (LangChain best practice)
@@ -203,7 +303,7 @@ async def invoke_with_retry(
     chain: Runnable,
     input_data: Dict[str, Any],
     config: Optional[RunnableConfig] = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     retry_delay: float = 1.0,
 ) -> Any:
     """
@@ -268,7 +368,7 @@ async def invoke_with_retry(
                         raw_output=last_raw_output,
                     )
                     enhanced_input["error_feedback"] = error_feedback
-                    logger.info(
+                    logger.debug(
                         f"Retrying with error feedback (attempt {attempt + 1}/{max_retries}). "
                         f"Previous error: {type(last_exception).__name__}"
                     )
@@ -276,7 +376,7 @@ async def invoke_with_retry(
                     # If error feedback creation fails, use basic feedback
                     logger.warning(f"Failed to create error feedback: {feedback_error}. Using basic feedback.")
                     enhanced_input["error_feedback"] = (
-                        f"⚠️ PREVIOUS ATTEMPT #{attempt + 1} FAILED ⚠️\n\n"
+                        f"PREVIOUS ATTEMPT #{attempt + 1} FAILED\n\n"
                         f"Error: {type(last_exception).__name__}: {str(last_exception)[:300]}\n\n"
                         f"Please correct your output and try again. DO NOT return None or empty output."
                     )
@@ -285,8 +385,9 @@ async def invoke_with_retry(
             
             logger.debug(f"Invoking chain (attempt {attempt + 1}/{max_retries})")
             
-            # Capture messages before sending (for logging)
+            # Capture messages before sending (for logging together with response)
             messages_to_send = None
+            llm_params = {}
             
             # Try to extract and render messages from the chain before invocation
             if PIPELINE_LOGGER_AVAILABLE:
@@ -299,10 +400,10 @@ async def invoke_with_retry(
                             if isinstance(chain.first, ChatPromptTemplate):
                                 try:
                                     rendered = chain.first.format_messages(**enhanced_input)
-                                    messages_to_send = rendered
+                                    # Match the actual runtime behavior: split large user context into multiple user messages.
+                                    messages_to_send = _split_prompt_messages(rendered)
                                     
                                     # Extract LLM parameters from chain
-                                    llm_params = {}
                                     try:
                                         # Try to extract LLM from chain
                                         llm_obj = None
@@ -321,34 +422,44 @@ async def invoke_with_retry(
                                             }
                                     except Exception as e:
                                         logger.debug(f"Could not extract LLM parameters: {e}")
-                                    
-                                    # Log the actual messages being sent
-                                    pipeline_logger.log_llm_call(
-                                        step_name=f"Standard Chain - Messages Sent (Attempt {attempt + 1})",
-                                        messages_sent=messages_to_send,
-                                        input_data=enhanced_input,
-                                        attempt_number=attempt + 1 if attempt > 0 else None,
-                                        llm_params=llm_params if llm_params else None,
-                                    )
                                 except Exception as e:
                                     logger.debug(f"Could not render prompt template: {e}")
                 except Exception as log_error:
-                    logger.debug(f"Failed to log chain messages: {log_error}")
+                    logger.debug(f"Failed to prepare logging: {log_error}")
             
+            # Invoke the chain and wait for result
             result = await chain.ainvoke(enhanced_input, config=config)
             
-            # Log the result (which is already parsed for standard chains)
-            if PIPELINE_LOGGER_AVAILABLE and attempt == max_retries - 1:
+            # Capture raw response for logging (before parsing)
+            raw_response_for_log = None
+            try:
+                # Try to extract raw AIMessage from result
+                if hasattr(result, 'content'):
+                    raw_response_for_log = result
+                elif isinstance(result, dict) and 'content' in result:
+                    raw_response_for_log = result
+                # For structured output chains, the result might be the parsed object
+                # Try to get raw response from chain internals if possible
+            except Exception:
+                pass
+            
+            # Log request and response together in a single entry
+            if PIPELINE_LOGGER_AVAILABLE:
                 try:
                     pipeline_logger = get_pipeline_logger()
                     if pipeline_logger.file_handle:
+                        # Log everything together: messages sent, raw response, and parsed result
                         pipeline_logger.log_llm_call(
-                            step_name=f"Standard Chain - Final Result (Attempt {attempt + 1})",
+                            step_name=f"Standard Chain - Complete Call (Attempt {attempt + 1})",
+                            messages_sent=messages_to_send,
+                            input_data=enhanced_input if not messages_to_send else None,  # Only include if messages weren't captured
+                            raw_response=raw_response_for_log,
                             response=result,
                             attempt_number=attempt + 1 if attempt > 0 else None,
+                            llm_params=llm_params if llm_params else None,
                         )
                 except Exception as log_error:
-                    logger.debug(f"Failed to log chain result: {log_error}")
+                    logger.debug(f"Failed to log complete call: {log_error}")
             
             # CRITICAL: Check for None output - always retry with error feedback
             if result is None:
@@ -378,10 +489,32 @@ async def invoke_with_retry(
                     logger.debug(f"Could not validate None fields: {validation_error}")
             
             if attempt > 0:
-                logger.info(
+                logger.debug(
                     f"Chain invocation succeeded on attempt {attempt + 1} "
                     f"after receiving error feedback"
                 )
+            
+            # Log summary of result
+            try:
+                result_summary = "N/A"
+                if hasattr(result, 'model_dump'):
+                    result_dict = result.model_dump()
+                    if isinstance(result_dict, dict):
+                        keys = list(result_dict.keys())[:5]
+                        result_summary = f"Keys: {keys}" + (f" (+{len(result_dict)-5} more)" if len(result_dict) > 5 else "")
+                elif isinstance(result, dict):
+                    keys = list(result.keys())[:5]
+                    result_summary = f"Keys: {keys}" + (f" (+{len(result)-5} more)" if len(result) > 5 else "")
+                else:
+                    result_summary = str(result)[:200]
+                
+                logger.debug(
+                    f"LLM Chain Result: Type={type(result).__name__}, "
+                    f"Summary={result_summary}"
+                )
+            except Exception as summary_error:
+                logger.debug(f"Could not create result summary: {summary_error}")
+            
             return result
             
         except BadRequestError as e:
@@ -433,6 +566,27 @@ async def invoke_with_retry(
                     last_raw_output = output_part[:500]
                 except:
                     pass
+
+            # Log request + failure in a single coherent entry (important: pipeline.log must include failures too)
+            if PIPELINE_LOGGER_AVAILABLE:
+                try:
+                    pipeline_logger = get_pipeline_logger()
+                    if pipeline_logger.file_handle:
+                        pipeline_logger.log_llm_call(
+                            step_name=f"Standard Chain - Parse Failure (Attempt {attempt + 1})",
+                            messages_sent=messages_to_send,
+                            input_data=enhanced_input if not messages_to_send else None,
+                            raw_response=last_raw_output,
+                            response={
+                                "error_type": type(e).__name__,
+                                "error": str(e),
+                                "raw_output_excerpt": last_raw_output,
+                            },
+                            attempt_number=attempt + 1 if attempt > 0 else None,
+                            llm_params=llm_params if llm_params else None,
+                        )
+                except Exception as log_error:
+                    logger.debug(f"Failed to log parse failure call: {log_error}")
             
             if attempt < max_retries - 1:
                 wait_time = retry_delay * (2 ** attempt)

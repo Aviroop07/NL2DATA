@@ -4,7 +4,7 @@ Assign appropriate SQL data types to each attribute.
 Critical for DDL generation - incorrect types cause schema creation failures or data loss.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase4.model_router import get_model_for_step
@@ -18,6 +18,107 @@ from NL2DATA.phases.phase1.utils.data_extraction import (
 )
 
 logger = get_logger(__name__)
+
+_DATE_TOKENS = ("date",)
+_TS_TOKENS = ("datetime", "timestamp", "time")
+
+
+def _is_timestamp_like(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if n.endswith("_at"):
+        return True
+    return any(t in n for t in _TS_TOKENS)
+
+
+def _is_date_like(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    # Prefer TIMESTAMP if also time-like
+    if _is_timestamp_like(n):
+        return False
+    return any(t in n for t in _DATE_TOKENS) or n.endswith("_date")
+
+
+def _infer_type_from_name_and_hint(attr_name: str, type_hint: Optional[str]) -> Tuple[str, Optional[int], Optional[int], Optional[int]]:
+    """Return (sql_type, size, precision, scale)."""
+    n = (attr_name or "").strip().lower()
+    h = (type_hint or "").strip().lower()
+
+    if h:
+        # Honor explicit hints first
+        if "bool" in h:
+            return "BOOLEAN", None, None, None
+        if "timestamp" in h or "datetime" in h:
+            return "TIMESTAMP", None, None, None
+        if h == "date" or "date only" in h:
+            return "DATE", None, None, None
+        if "int" in h or "integer" in h or "bigint" in h:
+            return "BIGINT", None, None, None
+        if "decimal" in h or "numeric" in h or "money" in h:
+            return "DECIMAL", None, 12, 2
+        if "float" in h or "double" in h or "real" in h:
+            return "DOUBLE", None, None, None
+        if "json" in h:
+            return "JSON", None, None, None
+
+    # Name-based heuristics (portable defaults)
+    if n.endswith("_id") or n in {"id"}:
+        return "BIGINT", None, None, None
+    if n.startswith("is_") or n.startswith("has_") or n.endswith("_flag") or n.endswith("_enabled") or n.endswith("_breached"):
+        return "BOOLEAN", None, None, None
+    if _is_timestamp_like(n):
+        return "TIMESTAMP", None, None, None
+    if _is_date_like(n):
+        return "DATE", None, None, None
+    if any(t in n for t in ("price", "amount", "subtotal", "total", "fee", "cost", "revenue")):
+        return "DECIMAL", None, 12, 2
+    if "percent" in n or n.endswith("_pct") or n.endswith("_percentage") or n.endswith("_rate"):
+        return "DECIMAL", None, 6, 4
+    if any(t in n for t in ("quantity", "count", "num_", "_num", "days", "minutes", "seconds", "hours", "km", "distance")):
+        return "INT", None, None, None
+
+    if "description" in n or "notes" in n or "comment" in n:
+        return "TEXT", None, None, None
+    # Default string
+    return "VARCHAR", 255, None, None
+
+
+def _deterministic_type_assignment(
+    *,
+    entity_name: str,
+    attributes: List[Dict[str, Any]],
+    primary_key: Optional[List[str]],
+) -> Dict[str, Any]:
+    """Deterministic fallback when the LLM fails to produce a valid schema."""
+    pk_set = set([a for a in (primary_key or []) if isinstance(a, str) and a])
+    out: Dict[str, Any] = {}
+    for attr in attributes or []:
+        attr_name = extract_attribute_name(attr)
+        if not attr_name:
+            continue
+        hint = extract_attribute_type_hint(attr)
+        sql_type, size, precision, scale = _infer_type_from_name_and_hint(attr_name, hint)
+        if attr_name in pk_set and sql_type not in {"INT", "BIGINT", "UUID", "VARCHAR"}:
+            # Keep PKs simple/portable
+            sql_type, size, precision, scale = "BIGINT", None, None, None
+        reasoning = (
+            f"Deterministic fallback: inferred {sql_type}"
+            + (f"({size})" if sql_type == "VARCHAR" and size else "")
+            + (f"({precision},{scale})" if sql_type == "DECIMAL" and precision is not None and scale is not None else "")
+            + f" for '{attr_name}' based on name/type_hint."
+        )
+        out[attr_name] = {
+            "type": sql_type,
+            "size": size,
+            "precision": precision,
+            "scale": scale,
+            "constraints": {},
+            "reasoning": reasoning,
+        }
+    return {"attribute_types": out}
 
 
 class AttributeTypeInfo(BaseModel):
@@ -220,12 +321,11 @@ Return a JSON object with:
 - Using TEXT for short strings (use VARCHAR with appropriate size)"""
 
     # Human prompt template
+    # IMPORTANT: Avoid passing the full NL here; it often describes columns of other entities and
+    # encourages the model to invent types/fields. Attributes + descriptions + constraints are enough.
     human_prompt_template = """Assign SQL data types to attributes for the entity: {entity_name}
 
 {context}
-
-Natural Language Description:
-{nl_description}
 
 Return a JSON object with data types for all attributes, including reasoning for each type selection."""
 
@@ -242,7 +342,7 @@ Return a JSON object with data types for all attributes, including reasoning for
             input_data={
                 "entity_name": entity_name,
                 "context": context_msg,
-                "nl_description": nl_description or "",
+                "nl_description": "",
             },
             config=config,
         )
@@ -255,11 +355,17 @@ Return a JSON object with data types for all attributes, including reasoning for
         return result.model_dump()
         
     except Exception as e:
-        logger.error(
-            f"Error assigning data types for entity {entity_name}: {e}",
-            exc_info=True
+        # This step is late in the pipeline; fail-open with deterministic types rather than aborting.
+        # The LLM sometimes returns empty/invalid tool arguments (missing 'attribute_types'), causing parsing failures.
+        logger.error(f"Error assigning data types for entity {entity_name}: {e}", exc_info=True)
+        logger.warning(
+            f"Entity {entity_name}: Falling back to deterministic type assignment for {len(attributes)} attribute(s)."
         )
-        raise
+        return _deterministic_type_assignment(
+            entity_name=entity_name,
+            attributes=attributes,
+            primary_key=primary_key,
+        )
 
 
 async def step_4_3_data_type_assignment_batch(

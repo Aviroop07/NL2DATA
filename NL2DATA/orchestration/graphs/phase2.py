@@ -1,6 +1,6 @@
 """Phase 2: Attribute Discovery & Schema Design Graph."""
 
-from typing import Dict, Any, Literal
+from typing import Dict, Any, List, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -26,6 +26,23 @@ def _cleanup_complete(state: IRGenerationState) -> Literal["complete", "incomple
     if cleanup_complete:
         return "complete"
     return "incomplete"
+
+
+def _attributes_to_name_lists(attributes: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Convert state["attributes"] (entity -> list[dict|model]) into entity -> list[str] names."""
+    out: Dict[str, List[str]] = {}
+    for entity_name, attrs in (attributes or {}).items():
+        names: List[str] = []
+        if isinstance(attrs, list):
+            for a in attrs:
+                if isinstance(a, dict):
+                    n = a.get("name", "")
+                else:
+                    n = getattr(a, "name", "")
+                if n:
+                    names.append(n)
+        out[entity_name] = names
+    return out
 
 
 def _wrap_step_2_1(step_func):
@@ -58,8 +75,9 @@ def _wrap_step_2_2(step_func):
             primary_keys=state.get("primary_keys", {})
         )
         
-        # Update attributes in state (LangGraph will merge)
-        attributes = result.get("entity_results", {})
+        # Normalize to entity -> attribute_list (not the wrapper payload)
+        raw = result.get("entity_results", {}) or {}
+        attributes = {k: (v.get("attributes", []) if isinstance(v, dict) else []) for k, v in raw.items()}
         
         return {
             "attributes": attributes,
@@ -80,8 +98,8 @@ def _wrap_step_2_3(step_func):
             nl_description=state["nl_description"]
         )
         
-        # Update attributes after synonym merging
-        updated_attributes = result.get("entity_results", {})
+        # Update attributes after synonym merging (entity -> list[dict])
+        updated_attributes = result.get("updated_attributes", {}) or state.get("attributes", {})
         
         return {
             "attributes": updated_attributes,
@@ -96,19 +114,18 @@ def _wrap_step_2_4(step_func):
     async def node(state: IRGenerationState) -> Dict[str, Any]:
         logger.info("[LangGraph] Executing Step 2.4: Composite Attribute Handling")
         prev_answers = state.get("previous_answers", {})
+        attr_name_lists = _attributes_to_name_lists(state.get("attributes", {}))
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
-            nl_description=state["nl_description"]
+            entity_attributes=attr_name_lists,
+            nl_description=state["nl_description"],
         )
-        
-        # Update attributes after composite decomposition
-        updated_attributes = result.get("entity_results", {})
-        
+
+        # Composite handling currently produces recommendations; keep attributes unchanged.
         return {
-            "attributes": updated_attributes,
             "current_step": "2.4",
-            "previous_answers": {**prev_answers, "2.4": result}
+            "previous_answers": {**prev_answers, "2.4": result},
+            "composite_decompositions": result.get("composite_decompositions", {}) if isinstance(result, dict) else {},
         }
     return node
 
@@ -118,17 +135,15 @@ def _wrap_step_2_5(step_func):
     async def node(state: IRGenerationState) -> Dict[str, Any]:
         logger.info("[LangGraph] Executing Step 2.5: Temporal Attributes Detection")
         prev_answers = state.get("previous_answers", {})
+        attr_name_lists = _attributes_to_name_lists(state.get("attributes", {}))
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
+            entity_attributes=attr_name_lists,
             nl_description=state["nl_description"]
         )
-        
-        # Update attributes with temporal attributes
-        updated_attributes = result.get("entity_results", {})
-        
+
+        # Temporal step produces recommendations; keep attributes unchanged for now.
         return {
-            "attributes": updated_attributes,
             "current_step": "2.5",
             "previous_answers": {**prev_answers, "2.5": result}
         }
@@ -142,7 +157,7 @@ def _wrap_step_2_6(step_func):
         prev_answers = state.get("previous_answers", {})
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
+            attributes=_attributes_to_name_lists(state.get("attributes", {})),
             domain=state.get("domain"),
             nl_description=state["nl_description"]
         )
@@ -165,7 +180,7 @@ def _wrap_step_2_7(step_func):
         prev_answers = state.get("previous_answers", {})
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {})
+            attributes=_attributes_to_name_lists(state.get("attributes", {}))
         )
         
         # Update primary keys
@@ -186,7 +201,9 @@ def _wrap_step_2_8(step_func):
         prev_answers = state.get("previous_answers", {})
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {})
+            entity_attributes=_attributes_to_name_lists(state.get("attributes", {})),
+            nl_description=state["nl_description"],
+            domain=state.get("domain"),
         )
         
         return {
@@ -201,15 +218,62 @@ def _wrap_step_2_9(step_func):
     async def node(state: IRGenerationState) -> Dict[str, Any]:
         logger.info("[LangGraph] Executing Step 2.9: Derived Attribute Formulas")
         prev_answers = state.get("previous_answers", {})
+        mv = (prev_answers.get("2.8") or {}).get("entity_results", {}) if isinstance(prev_answers.get("2.8"), dict) else {}
+        entity_derived_attributes: Dict[str, List[str]] = {}
+        derivation_rules: Dict[str, Dict[str, str]] = {}
+        for entity_name, mv_out in (mv or {}).items():
+            if not isinstance(mv_out, dict):
+                continue
+            derived = mv_out.get("derived", []) or []
+            if isinstance(derived, list) and derived:
+                entity_derived_attributes[entity_name] = [d for d in derived if isinstance(d, str) and d]
+            dr = mv_out.get("derivation_rules", {}) or {}
+            if isinstance(dr, dict) and dr:
+                derivation_rules[entity_name] = {k: str(v) for k, v in dr.items() if isinstance(k, str) and k}
+
+        entity_attr_lists = _attributes_to_name_lists(state.get("attributes", {}))
+        entity_descriptions = {
+            (e.get("name") if isinstance(e, dict) else getattr(e, "name", "")): (
+                e.get("description", "") if isinstance(e, dict) else getattr(e, "description", "")
+            )
+            for e in (state.get("entities", []) or [])
+            if (e.get("name") if isinstance(e, dict) else getattr(e, "name", ""))
+        }
+
         result = await step_func(
-            entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
-            multivalued_derived_results=prev_answers.get("2.8")
+            entity_derived_attributes=entity_derived_attributes,
+            entity_attributes=entity_attr_lists,
+            entity_descriptions=entity_descriptions,
+            derivation_rules=derivation_rules,
+            nl_description=state["nl_description"],
         )
+
+        # Flatten into state["derived_formulas"]/["derived_metrics"] keyed by "Entity.attr"
+        derived_formulas: Dict[str, Dict[str, Any]] = {}
+        derived_metrics: Dict[str, Dict[str, Any]] = {}
+        if isinstance(result, dict):
+            row_level = result.get("entity_results", {}) or {}
+            metrics = result.get("entity_metrics", {}) or {}
+            if isinstance(row_level, dict):
+                for ent, mp in row_level.items():
+                    if not isinstance(mp, dict):
+                        continue
+                    for attr, info in mp.items():
+                        if isinstance(attr, str) and attr and isinstance(info, dict):
+                            derived_formulas[f"{ent}.{attr}"] = info
+            if isinstance(metrics, dict):
+                for ent, mp in metrics.items():
+                    if not isinstance(mp, dict):
+                        continue
+                    for attr, info in mp.items():
+                        if isinstance(attr, str) and attr and isinstance(info, dict):
+                            derived_metrics[f"{ent}.{attr}"] = info
         
         return {
             "current_step": "2.9",
-            "previous_answers": {**prev_answers, "2.9": result}
+            "previous_answers": {**prev_answers, "2.9": result},
+            "derived_formulas": derived_formulas,
+            "derived_metrics": derived_metrics,
         }
     return node
 
@@ -221,7 +285,7 @@ def _wrap_step_2_10(step_func):
         prev_answers = state.get("previous_answers", {})
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
+            attributes=_attributes_to_name_lists(state.get("attributes", {})),
             primary_keys=state.get("primary_keys", {})
         )
         
@@ -251,7 +315,7 @@ def _wrap_step_2_11(step_func):
         prev_answers = state.get("previous_answers", {})
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {})
+            attributes=_attributes_to_name_lists(state.get("attributes", {}))
         )
         
         return {
@@ -268,44 +332,13 @@ def _wrap_step_2_12(step_func):
         prev_answers = state.get("previous_answers", {})
         result = await step_func(
             entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
+            attributes=_attributes_to_name_lists(state.get("attributes", {})),
             nullability_results=prev_answers.get("2.11")
         )
         
         return {
             "current_step": "2.12",
             "previous_answers": {**prev_answers, "2.12": result}
-        }
-    return node
-
-
-def _wrap_step_2_13(step_func):
-    """Wrap Step 2.13 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 2.13: Check Constraints")
-        prev_answers = state.get("previous_answers", {})
-        result = await step_func(
-            entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
-            nl_description=state["nl_description"]
-        )
-        
-        # Update constraints
-        constraints = result.get("entity_results", {})
-        constraint_list = []
-        for entity_name, entity_constraints in constraints.items():
-            for attr_name, check_constraint in entity_constraints.get("check_constraints", {}).items():
-                constraint_list.append({
-                    "type": "check",
-                    "entity": entity_name,
-                    "attribute": attr_name,
-                    "condition": check_constraint.get("condition", "")
-                })
-        
-        return {
-            "constraints": constraint_list,
-            "current_step": "2.13",
-            "previous_answers": {**prev_answers, "2.13": result}
         }
     return node
 
@@ -324,8 +357,8 @@ def _wrap_step_2_14(step_func):
             domain=state.get("domain")
         )
         
-        # Update attributes after cleanup
-        updated_attributes = result.get("entity_results", {})
+        # Update attributes after cleanup (entity -> list[dict])
+        updated_attributes = result.get("updated_attributes", {}) or state.get("attributes", {})
         
         return {
             "attributes": updated_attributes,
@@ -335,6 +368,27 @@ def _wrap_step_2_14(step_func):
                 **state.get("metadata", {}),
                 "cleanup_complete": result.get("all_complete", False)
             }
+        }
+    return node
+
+
+def _wrap_step_2_16(step_func):
+    """Wrap Step 2.16 to work as LangGraph node."""
+    async def node(state: IRGenerationState) -> Dict[str, Any]:
+        logger.info("[LangGraph] Executing Step 2.16: Cross-Entity Attribute Reconciliation")
+        prev_answers = state.get("previous_answers", {})
+        result = await step_func(
+            entities=state.get("entities", []),
+            attributes=state.get("attributes", {}),
+            relations=state.get("relations", []),
+            nl_description=state["nl_description"],
+            domain=state.get("domain"),
+        )
+        updated_attributes = result.get("updated_attributes", {}) or state.get("attributes", {})
+        return {
+            "attributes": updated_attributes,
+            "current_step": "2.16",
+            "previous_answers": {**prev_answers, "2.16": result},
         }
     return node
 
@@ -374,7 +428,7 @@ def create_phase_2_graph() -> StateGraph:
     10. Unique Constraints (2.10) - parallel per entity
     11. Nullability Constraints (2.11) - parallel per entity
     12. Default Values (2.12) - parallel per entity
-    13. Check Constraints (2.13) - parallel per entity
+    13. (disabled) Check Constraints (2.13)
     14. Entity Cleanup (2.14) - parallel per entity (loop)
     15. Relation Intrinsic Attributes (2.15) - parallel per relation
     
@@ -394,9 +448,11 @@ def create_phase_2_graph() -> StateGraph:
         step_2_10_unique_constraints_batch,
         step_2_11_nullability_constraints_batch,
         step_2_12_default_values_batch,
-        step_2_13_check_constraints_batch,
     )
     from NL2DATA.phases.phase2.step_2_14_entity_cleanup import step_2_14_entity_cleanup_batch
+    from NL2DATA.phases.phase2.step_2_16_cross_entity_attribute_reconciliation import (
+        step_2_16_cross_entity_attribute_reconciliation_batch,
+    )
     from NL2DATA.phases.phase2.step_2_15_relation_intrinsic_attributes import step_2_15_relation_intrinsic_attributes_batch
     
     # Create graph
@@ -406,6 +462,7 @@ def create_phase_2_graph() -> StateGraph:
     workflow.add_node("attribute_count", _wrap_step_2_1(step_2_1_attribute_count_detection_batch))
     workflow.add_node("intrinsic_attributes", _wrap_step_2_2(step_2_2_intrinsic_attributes_batch))
     workflow.add_node("synonym_detection", _wrap_step_2_3(step_2_3_attribute_synonym_detection_batch))
+    workflow.add_node("cross_entity_reconcile", _wrap_step_2_16(step_2_16_cross_entity_attribute_reconciliation_batch))
     workflow.add_node("composite_handling", _wrap_step_2_4(step_2_4_composite_attribute_handling_batch))
     workflow.add_node("temporal_attributes", _wrap_step_2_5(step_2_5_temporal_attributes_detection_batch))
     workflow.add_node("naming_validation", _wrap_step_2_6(step_2_6_naming_convention_validation))
@@ -415,7 +472,6 @@ def create_phase_2_graph() -> StateGraph:
     workflow.add_node("unique_constraints", _wrap_step_2_10(step_2_10_unique_constraints_batch))
     workflow.add_node("nullability", _wrap_step_2_11(step_2_11_nullability_constraints_batch))
     workflow.add_node("default_values", _wrap_step_2_12(step_2_12_default_values_batch))
-    workflow.add_node("check_constraints", _wrap_step_2_13(step_2_13_check_constraints_batch))
     workflow.add_node("entity_cleanup", _wrap_step_2_14(step_2_14_entity_cleanup_batch))
     workflow.add_node("relation_attributes", _wrap_step_2_15(step_2_15_relation_intrinsic_attributes_batch))
     
@@ -425,7 +481,8 @@ def create_phase_2_graph() -> StateGraph:
     # Add edges (sequential flow with parallel execution within nodes)
     workflow.add_edge("attribute_count", "intrinsic_attributes")
     workflow.add_edge("intrinsic_attributes", "synonym_detection")
-    workflow.add_edge("synonym_detection", "composite_handling")
+    workflow.add_edge("synonym_detection", "cross_entity_reconcile")
+    workflow.add_edge("cross_entity_reconcile", "composite_handling")
     workflow.add_edge("composite_handling", "temporal_attributes")
     workflow.add_edge("temporal_attributes", "naming_validation")
     
@@ -444,8 +501,7 @@ def create_phase_2_graph() -> StateGraph:
     workflow.add_edge("derived_formulas", "unique_constraints")
     workflow.add_edge("unique_constraints", "nullability")
     workflow.add_edge("nullability", "default_values")
-    workflow.add_edge("default_values", "check_constraints")
-    workflow.add_edge("check_constraints", "entity_cleanup")
+    workflow.add_edge("default_values", "entity_cleanup")
     
     # Conditional: Loop back if cleanup not complete
     workflow.add_conditional_edges(

@@ -245,7 +245,7 @@ async def invoke_agent_with_retry(
     input_data: Dict[str, Any],
     output_schema: Type[T],
     config: Optional[RunnableConfig] = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     retry_delay: float = 1.0,
 ) -> T:
     """
@@ -282,7 +282,7 @@ async def invoke_agent_with_retry(
                     raw_output=last_raw_output,
                     tool_call_errors=last_tool_call_errors,
                 )
-                logger.info(
+                logger.debug(
                     f"Retrying with error feedback (attempt {attempt + 1}/{max_retries}). "
                     f"Previous error: {type(last_exception).__name__}"
                 )
@@ -300,7 +300,7 @@ async def invoke_agent_with_retry(
                 last_tool_call_errors = tool_call_errors
                 
                 if attempt > 0:
-                    logger.info(
+                    logger.debug(
                         f"Agent executor invocation succeeded on attempt {attempt + 1} "
                         f"after receiving error feedback"
                     )

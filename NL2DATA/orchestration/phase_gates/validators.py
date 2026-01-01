@@ -6,6 +6,9 @@ Each validator checks a specific aspect of schema integrity.
 from typing import List, Dict, Any, Set
 import re
 
+from NL2DATA.utils.dsl.analysis import dsl_identifiers_used
+from NL2DATA.utils.dsl.validator import validate_dsl_expression
+
 
 def validate_entity_names(entities: List[Dict[str, Any]]) -> List[str]:
     """Validate entity names are SQL-safe.
@@ -183,6 +186,78 @@ def validate_derived_dependencies_exist(
                         f"non-existent attribute '{dep}'"
                     )
     
+    return issues
+
+
+def validate_derived_formula_dependencies_match_formula(
+    attributes: Dict[str, List[Dict[str, Any]]],
+    derived_formulas: Dict[str, Dict[str, Any]],
+) -> List[str]:
+    """Verify formula identifiers are entity-local and match the declared dependencies list.
+
+    Requirements:
+    - If a column name is mentioned nakedly, it must belong to the SAME entity.
+    - We deterministically extract identifiers used in the DSL formula and compare against
+      `dependencies` returned by the LLM.
+    """
+    issues: List[str] = []
+
+    # Build entity -> set(attr_names_lower)
+    entity_attr_names: Dict[str, Set[str]] = {}
+    for entity_name, attrs in (attributes or {}).items():
+        s: Set[str] = set()
+        if isinstance(attrs, list):
+            for a in attrs:
+                n = a.get("name", "") if isinstance(a, dict) else getattr(a, "name", "")
+                if n:
+                    s.add(str(n).lower())
+        entity_attr_names[entity_name] = s
+
+    for key, info in (derived_formulas or {}).items():
+        if not isinstance(key, str) or "." not in key:
+            continue
+        if not isinstance(info, dict):
+            continue
+
+        entity_name, attr_name = key.split(".", 1)
+        allowed = entity_attr_names.get(entity_name, set())
+
+        formula = (info.get("formula") or "").strip()
+        if not formula:
+            issues.append(f"Derived attribute '{key}' has empty formula")
+            continue
+
+        v = validate_dsl_expression(formula)
+        if not v.get("valid", False):
+            issues.append(f"Derived attribute '{key}' has invalid DSL formula: {v.get('error')}")
+            continue
+
+        used = dsl_identifiers_used(formula)
+        dotted = sorted([u for u in used if isinstance(u, str) and "." in u])
+        if dotted:
+            issues.append(f"Derived attribute '{key}' formula uses dotted identifiers (not allowed): {dotted}")
+
+        used_bare = {u.lower() for u in used if isinstance(u, str) and u and "." not in u}
+
+        # Naked identifiers must be entity-local.
+        outside = sorted([u for u in used_bare if u not in allowed])
+        if outside:
+            issues.append(
+                f"Derived attribute '{key}' formula references identifiers not in entity '{entity_name}': {outside}"
+            )
+
+        deps = info.get("dependencies", []) or []
+        if not isinstance(deps, list):
+            deps = []
+        deps_norm = {str(d).lower() for d in deps if isinstance(d, str) and d}
+
+        missing = sorted(list(used_bare - deps_norm))
+        extra = sorted(list(deps_norm - used_bare))
+        if missing:
+            issues.append(f"Derived attribute '{key}' dependencies missing identifiers used in formula: {missing}")
+        if extra:
+            issues.append(f"Derived attribute '{key}' dependencies contain unused identifiers: {extra}")
+
     return issues
 
 

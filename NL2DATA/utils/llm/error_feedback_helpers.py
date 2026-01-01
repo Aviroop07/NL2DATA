@@ -11,7 +11,7 @@ def format_missing_fields_feedback(
     feedback: str,
 ) -> str:
     """Format feedback for missing required fields."""
-    feedback += f"❌ Missing required fields: {', '.join(missing_fields)}\n"
+    feedback += f"ERROR Missing required fields: {', '.join(missing_fields)}\n"
     feedback += f"   These fields are REQUIRED and must be included in your output.\n\n"
     return feedback
 
@@ -22,7 +22,7 @@ def format_wrong_fields_feedback(
     feedback: str,
 ) -> str:
     """Format feedback for incorrect field names."""
-    feedback += f"❌ Incorrect field names used: {', '.join(wrong_fields)}\n"
+    feedback += f"ERROR Incorrect field names used: {', '.join(wrong_fields)}\n"
     # Try to suggest correct field names (only if schema available)
     if output_schema is not None:
         try:
@@ -39,7 +39,7 @@ def format_type_errors_feedback(
     feedback: str,
 ) -> str:
     """Format feedback for type errors."""
-    feedback += f"❌ Type errors:\n"
+    feedback += "ERROR Type errors:\n"
     for field, expected_type, actual_value in type_errors:
         feedback += f"   - Field '{field}': Expected {expected_type}, got {type(actual_value).__name__}\n"
     feedback += "\n"
@@ -51,7 +51,7 @@ def format_json_parse_error_feedback(
     feedback: str,
 ) -> str:
     """Format feedback for JSON parsing errors."""
-    feedback += f"❌ JSON parsing failed.\n"
+    feedback += "ERROR JSON parsing failed.\n"
     feedback += f"   Your output must be ONLY valid JSON, with no markdown formatting, no code blocks, no explanatory text.\n"
     feedback += f"   Do NOT use ```json``` blocks or any markdown.\n"
     feedback += f"   Return ONLY the raw JSON object starting with {{ and ending with }}.\n\n"
@@ -67,7 +67,7 @@ def format_none_fields_feedback(
     feedback: str,
 ) -> str:
     """Format feedback for None values in required fields."""
-    feedback += f"❌ None values found in required fields: {', '.join(none_fields)}\n"
+    feedback += f"ERROR None values found in required fields: {', '.join(none_fields)}\n"
     feedback += f"   These fields MUST have non-None values.\n"
     feedback += f"   None values are NOT acceptable for these fields.\n\n"
     return feedback
@@ -75,7 +75,7 @@ def format_none_fields_feedback(
 
 def format_empty_output_feedback(feedback: str) -> str:
     """Format feedback for empty or None output."""
-    feedback += f"❌ Empty or None output received.\n"
+    feedback += "ERROR Empty or None output received.\n"
     feedback += f"   You MUST return a valid JSON object matching the required schema.\n"
     feedback += f"   Returning None or empty output is NOT acceptable.\n\n"
     return feedback
@@ -89,7 +89,7 @@ def format_tool_call_errors_feedback(
     if not tool_call_errors:
         return feedback
     
-    feedback += f"❌ TOOL CALL ERRORS (These occurred during tool execution):\n"
+    feedback += "ERROR TOOL CALL ERRORS (These occurred during tool execution):\n"
     for tool_error in tool_call_errors:
         tool_name = tool_error.get("tool", "unknown")
         error_msg = tool_error.get("error", "unknown error")
@@ -103,22 +103,22 @@ def format_tool_call_errors_feedback(
         if isinstance(provided_args, list) and provided_args:
             # Check if it's a list of strings (parameter names) vs list of dicts
             if isinstance(provided_args[0], str):
-                feedback += f"   ❌ CRITICAL FORMAT ERROR: You provided arguments as a LIST of parameter names!\n"
+                feedback += "   ERROR CRITICAL FORMAT ERROR: You provided arguments as a LIST of parameter names.\n"
                 feedback += f"      What you provided: {provided_args} (this is just parameter names, not values)\n"
                 feedback += f"      What is required: A dictionary/object with parameter names as keys and their values\n"
                 feedback += f"      Example for {tool_name}:\n"
                 if "entities" in tool_name.lower():
-                    feedback += f"         ❌ WRONG: [\"entities\"]\n"
-                    feedback += f"         ✅ CORRECT: {{\"entities\": [\"Customer\", \"Order\"]}}\n"
+                    feedback += "         WRONG: [\"entities\"]\n"
+                    feedback += "         CORRECT: {\"entities\": [\"Customer\", \"Order\"]}\n"
                 elif "component" in tool_name.lower() or "schema" in tool_name.lower():
-                    feedback += f"         ❌ WRONG: [\"component_type\", \"name\"]\n"
-                    feedback += f"         ✅ CORRECT: {{\"component_type\": \"table\", \"name\": \"Customer\"}}\n"
+                    feedback += "         WRONG: [\"component_type\", \"name\"]\n"
+                    feedback += "         CORRECT: {\"component_type\": \"table\", \"name\": \"Customer\"}\n"
                 elif "sql" in tool_name.lower():
-                    feedback += f"         ❌ WRONG: [\"sql\"]\n"
-                    feedback += f"         ✅ CORRECT: {{\"sql\": \"SELECT * FROM Customer;\"}}\n"
+                    feedback += "         WRONG: [\"sql\"]\n"
+                    feedback += "         CORRECT: {\"sql\": \"SELECT * FROM Customer;\"}\n"
                 else:
-                    feedback += f"         ❌ WRONG: [\"param_name\"]\n"
-                    feedback += f"         ✅ CORRECT: {{\"param_name\": value}}\n"
+                    feedback += "         WRONG: [\"param_name\"]\n"
+                    feedback += "         CORRECT: {\"param_name\": value}\n"
                 feedback += f"      When calling tools, you MUST provide arguments as a JSON object (dictionary), not as a list.\n"
             else:
                 feedback += f"   What you provided: {provided_args}\n"
@@ -129,60 +129,60 @@ def format_tool_call_errors_feedback(
         if "Missing required argument" in error_message or "Missing required arguments" in error_message:
             # Determine which argument is missing and provide concrete example
             if "entities" in error_message.lower() or tool_name in ("verify_entities_exist", "verify_entities_exist_bound"):
-                feedback += f"\n   ❌ WRONG FORMAT (what you did):\n"
+                feedback += "\n   WRONG FORMAT (what you did):\n"
                 feedback += f"      - Providing arguments as a list: ['entities']\n"
                 feedback += f"      - Providing empty arguments: []\n"
                 feedback += f"      - Omitting the argument name\n"
-                feedback += f"\n   ✅ CORRECT FORMAT (what you should do):\n"
+                feedback += "\n   CORRECT FORMAT (what you should do):\n"
                 feedback += f"      When calling {tool_name}, you MUST provide arguments as a JSON object (dictionary):\n"
                 feedback += f"      {{\n"
                 feedback += f"        \"entities\": [\"Customer\", \"Order\", \"Book\"]\n"
                 feedback += f"      }}\n"
-                feedback += f"\n      NOT as a list: [\"entities\"] ❌\n"
-                feedback += f"      NOT as a string: \"entities\" ❌\n"
-                feedback += f"      But as a dict: {{\"entities\": [...]}} ✅\n"
+                feedback += "\n      NOT as a list: [\"entities\"] (WRONG)\n"
+                feedback += "      NOT as a string: \"entities\" (WRONG)\n"
+                feedback += "      But as a dict: {\"entities\": [...]} (CORRECT)\n"
             elif "sql" in error_message.lower() or tool_name in ("validate_query_against_schema", "validate_query_against_schema_bound", "validate_sql_syntax"):
-                feedback += f"\n   ❌ WRONG FORMAT (what you did):\n"
+                feedback += "\n   WRONG FORMAT (what you did):\n"
                 feedback += f"      - Providing arguments as a list: ['sql']\n"
                 feedback += f"      - Providing empty arguments: []\n"
                 feedback += f"      - Omitting the argument name\n"
-                feedback += f"\n   ✅ CORRECT FORMAT (what you should do):\n"
+                feedback += "\n   CORRECT FORMAT (what you should do):\n"
                 feedback += f"      When calling {tool_name}, you MUST provide arguments as a JSON object (dictionary):\n"
                 feedback += f"      {{\n"
                 feedback += f"        \"sql\": \"SELECT * FROM Customer;\"\n"
                 feedback += f"      }}\n"
-                feedback += f"\n      NOT as a list: [\"sql\"] ❌\n"
-                feedback += f"      NOT as a string: \"sql\" ❌\n"
-                feedback += f"      But as a dict: {{\"sql\": \"SELECT ...\"}} ✅\n"
+                feedback += "\n      NOT as a list: [\"sql\"] (WRONG)\n"
+                feedback += "      NOT as a string: \"sql\" (WRONG)\n"
+                feedback += "      But as a dict: {\"sql\": \"SELECT ...\"} (CORRECT)\n"
             elif "component" in tool_name.lower() or "schema" in tool_name.lower() or tool_name in ("check_schema_component_exists", "check_schema_component_exists_bound"):
-                feedback += f"\n   ❌ WRONG FORMAT (what you did):\n"
+                feedback += "\n   WRONG FORMAT (what you did):\n"
                 feedback += f"      - Providing arguments as a list: ['component_type', 'name']\n"
                 feedback += f"      - Providing empty arguments: []\n"
                 feedback += f"      - Omitting the argument names\n"
-                feedback += f"\n   ✅ CORRECT FORMAT (what you should do):\n"
+                feedback += "\n   CORRECT FORMAT (what you should do):\n"
                 feedback += f"      When calling {tool_name}, you MUST provide arguments as a JSON object (dictionary):\n"
                 feedback += f"      {{\n"
                 feedback += f"        \"component_type\": \"table\",\n"
                 feedback += f"        \"name\": \"Customer\"\n"
                 feedback += f"      }}\n"
-                feedback += f"\n      NOT as a list: [\"component_type\", \"name\"] ❌\n"
-                feedback += f"      NOT as separate strings: \"component_type\", \"name\" ❌\n"
-                feedback += f"      But as a dict: {{\"component_type\": \"table\", \"name\": \"Customer\"}} ✅\n"
+                feedback += "\n      NOT as a list: [\"component_type\", \"name\"] (WRONG)\n"
+                feedback += "      NOT as separate strings: \"component_type\", \"name\" (WRONG)\n"
+                feedback += "      But as a dict: {\"component_type\": \"table\", \"name\": \"Customer\"} (CORRECT)\n"
                 feedback += f"\n      Example calls:\n"
                 feedback += f"      - Check if table exists: {{\"component_type\": \"table\", \"name\": \"Customer\"}}\n"
                 feedback += f"      - Check if column exists: {{\"component_type\": \"column\", \"name\": \"customer_id\"}}\n"
             else:
-                feedback += f"\n   ❌ CORRECT FORMAT: When calling this tool, provide ALL required arguments as a JSON object (dictionary).\n"
+                feedback += "\n   CORRECT FORMAT: When calling this tool, provide ALL required arguments as a JSON object (dictionary).\n"
                 feedback += f"      Example: {{\"{tool_name}\": {{\"arg_name\": value, \"other_arg\": value}}}}\n"
                 feedback += f"      DO NOT provide arguments as a list [\"arg_name\"] or omit parameter names.\n"
                 feedback += f"      Arguments must be a dictionary/object with key-value pairs.\n"
         elif "not found" in error_message.lower():
-            feedback += f"   ❌ CORRECT FORMAT: Use the exact tool name as defined in the available tools.\n"
+            feedback += "   CORRECT FORMAT: Use the exact tool name as defined in the available tools.\n"
         else:
-            feedback += f"   ❌ CORRECT FORMAT: Ensure tool arguments match the tool's expected schema.\n"
+            feedback += "   CORRECT FORMAT: Ensure tool arguments match the tool's expected schema.\n"
             feedback += f"      Arguments must be provided as a JSON object (dictionary), not as a list or string.\n"
     
-    feedback += f"\n   📋 CRITICAL RULE: Tool arguments MUST be a JSON object (dictionary) with key-value pairs.\n"
+    feedback += "\n   CRITICAL RULE: Tool arguments MUST be a JSON object (dictionary) with key-value pairs.\n"
     feedback += f"      Format: {{\"argument_name\": argument_value}}\n"
     feedback += f"      NOT: [\"argument_name\"] or \"argument_name\" or []\n"
     feedback += f"\n   IMPORTANT: After fixing tool calls, you MUST still return your final answer as JSON.\n"
@@ -200,18 +200,18 @@ def format_schema_reference(
     if output_schema is not None:
         try:
             schema_json = output_schema.model_json_schema()
-            feedback += f"📋 REQUIRED OUTPUT SCHEMA:\n"
+            feedback += "REQUIRED OUTPUT SCHEMA:\n"
             feedback += f"{json.dumps(schema_json, indent=2)}\n\n"
         except Exception as e:
             from NL2DATA.utils.logging import get_logger
             logger = get_logger(__name__)
             logger.debug(f"Failed to generate schema JSON for feedback: {e}")
             try:
-                feedback += f"📋 REQUIRED OUTPUT SCHEMA: {output_schema.__name__}\n\n"
+                feedback += f"REQUIRED OUTPUT SCHEMA: {output_schema.__name__}\n\n"
             except Exception:
-                feedback += f"📋 REQUIRED OUTPUT SCHEMA: (schema details unavailable)\n\n"
+                feedback += "REQUIRED OUTPUT SCHEMA: (schema details unavailable)\n\n"
     else:
-        feedback += f"📋 NOTE: Output schema details are unavailable, but you must return valid JSON.\n\n"
+        feedback += "NOTE: Output schema details are unavailable, but you must return valid JSON.\n\n"
     
     return feedback
 

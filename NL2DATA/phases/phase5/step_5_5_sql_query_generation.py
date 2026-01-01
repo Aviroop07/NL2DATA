@@ -170,7 +170,7 @@ Generate a SQL query that answers this information need. Ensure the query:
         
         IMPORTANT: When calling this tool, provide arguments as a JSON object:
         {"sql": "SELECT * FROM Customer;"}
-        NOT as a list: ["sql"] ❌
+        NOT as a list: ["sql"] (WRONG)
         """
         schema_state = {
             "entities": [

@@ -14,6 +14,7 @@ from NL2DATA.utils.logging import get_logger
 from NL2DATA.phases.phase1.utils.data_extraction import extract_attribute_name
 from NL2DATA.utils.loops import SafeLoopExecutor, LoopConfig
 from NL2DATA.utils.tools.validation_tools import _verify_entities_exist_impl
+from NL2DATA.utils.pipeline_config import get_phase3_config
 
 logger = get_logger(__name__)
 
@@ -46,6 +47,58 @@ class InformationNeedIdentificationOutput(BaseModel):
         description="Whether the LLM suggests no further additions or deletions (termination condition for loop)"
     )
     reasoning: str = Field(description="Reasoning for the additions, deletions, and termination decision")
+
+
+def _validate_information_needs_output(
+    *,
+    entities: List[Dict[str, Any]],
+    result: InformationNeedIdentificationOutput,
+) -> List[Dict[str, Any]]:
+    """Deterministic validation for Step 3.1 output."""
+    issues: List[Dict[str, Any]] = []
+
+    allowed_entities = {
+        (e.get("name") if isinstance(e, dict) else getattr(e, "name", "")) for e in (entities or [])
+    }
+    allowed_entities = {e for e in allowed_entities if e}
+    allowed_frequencies = {"frequent", "occasional", "rare"}
+
+    seen_desc_ci: set[str] = set()
+    for idx, need in enumerate(result.information_needs or []):
+        desc = (need.description or "").strip()
+        if not desc:
+            issues.append({"issue_type": "empty_information_need_description", "detail": f"information_needs[{idx}].description is empty"})
+        else:
+            key = desc.lower()
+            if key in seen_desc_ci:
+                issues.append({"issue_type": "duplicate_information_need_description", "detail": f"Duplicate information need description (case-insensitive): '{desc}'", "value": desc})
+            seen_desc_ci.add(key)
+
+        freq = (need.frequency or "").strip().lower()
+        if freq and freq not in allowed_frequencies:
+            issues.append({"issue_type": "invalid_frequency", "detail": f"information_needs[{idx}].frequency must be one of {sorted(allowed_frequencies)}", "value": need.frequency})
+
+        bad_entities = [e for e in (need.entities_involved or []) if e and e not in allowed_entities]
+        if bad_entities:
+            issues.append(
+                {
+                    "issue_type": "unknown_entity_in_entities_involved",
+                    "detail": f"information_needs[{idx}].entities_involved references unknown entities",
+                    "value": bad_entities,
+                }
+            )
+
+    # Sanity: if no additions and no deletions, model should usually say no_more_changes=true
+    if not (result.additions or []) and not (result.deletions or []) and not result.no_more_changes:
+        issues.append(
+            {
+                "issue_type": "no_more_changes_inconsistent",
+                "detail": "No additions/deletions were proposed but no_more_changes=false; this can cause unnecessary looping.",
+                "value": {"no_more_changes": result.no_more_changes},
+            }
+        )
+
+    return issues
 
 
 @traceable_step("3.1", phase=3, tags=['phase_3_step_1'])
@@ -173,10 +226,7 @@ async def step_3_1_information_need_identification(
     # System prompt
     system_prompt = """You are a database design expert. Your task is to identify what information users will frequently need to query from the database.
 
-**AVAILABLE TOOLS**: You have access to a validation tool:
-- verify_entities_exist_bound(entities: List[str]) -> Dict[str, bool]: Verify that entities mentioned in information needs exist in the schema
-
-**IMPORTANT**: Use this tool to verify that all entities mentioned in entities_involved actually exist in the schema before finalizing your response. This ensures accuracy and prevents referencing non-existent entities.
+NOTE: Tool calling is disabled. You must self-verify entity names using ONLY the allowed entity names provided in context.
 
 INFORMATION NEED IDENTIFICATION:
 1. **Think like a user**: What questions will users ask? What reports will they need?
@@ -222,39 +272,7 @@ Return a JSON object specifying all information needs, any additions or deletion
         # Get model for this step (important task)
         llm = get_model_for_step("3.1")
         
-        # Build schema_state for tools
-        schema_state = {
-            "entities": entities,
-            "relations": relations,
-            "attributes": attributes,
-        }
-        
-        # Create bound version of verify_entities_exist with schema_state
-        def verify_entities_exist_bound(entities: List[str]) -> Dict[str, Any]:
-            """Bound version of verify_entities_exist with schema_state.
-            
-            Args:
-                entities: List of entity names to verify. Must be a list of strings.
-                         Example: ["Customer", "Order", "Book"]
-            
-            Returns:
-                Dictionary mapping entity name to existence status (True/False)
-            
-            Purpose: Allows LLM to verify that entities mentioned in information needs exist in the schema.
-            
-            IMPORTANT: When calling this tool, provide arguments as a JSON object:
-            {"entities": ["Customer", "Order"]}
-            NOT as a list: ["entities"] ❌
-            But as a dict: {"entities": ["Customer", "Order"]} ✅
-            """
-            # NOTE: verify_entities_exist is a LangChain @tool (StructuredTool) and is not callable like a function.
-            # Use the pure implementation to avoid "'StructuredTool' object is not callable".
-            return _verify_entities_exist_impl(entities, schema_state)
-        
-        # Create tools list
-        tools = [verify_entities_exist_bound]
-        
-        # Invoke standardized LLM call with tools
+        # Invoke standardized LLM call WITHOUT tools (faster; deterministic validation handles correctness)
         config = get_trace_config("3.1", phase=3, tags=["phase_3_step_1"])
         result: InformationNeedIdentificationOutput = await standardized_llm_call(
             llm=llm,
@@ -265,11 +283,88 @@ Return a JSON object specifying all information needs, any additions or deletion
                 "nl_description": nl_description,
                 "context": context_msg,
             },
-            tools=tools,
-            use_agent_executor=True,  # Use agent executor for tool calls
-            decouple_tools=True,  # Decouple tool calling from JSON generation
+            tools=None,
+            use_agent_executor=False,
+            decouple_tools=False,
             config=config,
         )
+
+        # Deterministic validation + revision loop (prevents hallucinated entities/frequencies and loop churn).
+        cfg = get_phase3_config()
+        for _round_idx in range(cfg.step_3_1_max_revision_rounds):
+            issues = _validate_information_needs_output(entities=entities, result=result)
+            if not issues:
+                break
+
+            allowed_entities = sorted(
+                {
+                    (e.get("name") if isinstance(e, dict) else getattr(e, "name", ""))
+                    for e in (entities or [])
+                }
+            )
+            allowed_entities = [e for e in allowed_entities if e]
+
+            revision_system_prompt = """You are a database design expert.
+
+You previously produced an information need identification payload.
+You will now receive:
+- The allowed entity names from the schema (you MUST ONLY use these in entities_involved)
+- Your previous output JSON
+- A deterministic list of validation issues
+
+Task: Return a corrected JSON output (same schema) that fixes all issues."""
+
+            revision_human_prompt = """Allowed entity names (MUST ONLY use these):
+{allowed_entities}
+
+Previous output (JSON):
+{previous_output_json}
+
+Validation issues (JSON):
+{issues_json}
+
+Return corrected JSON (same schema)."""
+
+            result = await standardized_llm_call(
+                llm=llm,
+                output_schema=InformationNeedIdentificationOutput,
+                system_prompt=revision_system_prompt,
+                human_prompt_template=revision_human_prompt,
+                input_data={
+                    "allowed_entities": ", ".join(allowed_entities),
+                    "previous_output_json": __import__("json").dumps(result.model_dump(), ensure_ascii=True),
+                    "issues_json": __import__("json").dumps(issues, ensure_ascii=True),
+                },
+                config=config,
+            )
+
+        final_issues = _validate_information_needs_output(entities=entities, result=result)
+        if final_issues:
+            logger.error(
+                f"Step 3.1: output still invalid after retries; falling back to pruning unknown entities in entities_involved."
+            )
+            allowed_entities = {
+                (e.get("name") if isinstance(e, dict) else getattr(e, "name", "")) for e in (entities or [])
+            }
+            allowed_entities = {e for e in allowed_entities if e}
+            # Prune unknown entities deterministically to keep pipeline runnable.
+            fixed_needs: List[InformationNeed] = []
+            for need in result.information_needs or []:
+                fixed_needs.append(
+                    InformationNeed(
+                        description=need.description,
+                        frequency=need.frequency,
+                        entities_involved=[e for e in (need.entities_involved or []) if e in allowed_entities],
+                        reasoning=need.reasoning,
+                    )
+                )
+            result = InformationNeedIdentificationOutput(
+                information_needs=fixed_needs,
+                additions=result.additions or [],
+                deletions=result.deletions or [],
+                no_more_changes=True,
+                reasoning=result.reasoning,
+            )
         
         # Work with Pydantic model directly
         # Validate that mentioned entities exist

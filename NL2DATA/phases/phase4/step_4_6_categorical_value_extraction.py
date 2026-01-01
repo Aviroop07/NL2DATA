@@ -11,6 +11,7 @@ from NL2DATA.phases.phase4.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.pipeline_config import get_phase4_config
 from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_attribute_name,
     extract_attribute_description,
@@ -35,6 +36,7 @@ async def step_4_6_categorical_value_extraction(
     entity_name: str,
     categorical_attribute: str,  # Name of the categorical attribute
     attribute_description: Optional[str] = None,  # Description of the attribute
+    attribute_type: Optional[str] = None,  # SQL type from Step 4.3
     nl_description: Optional[str] = None,
     entity_description: Optional[str] = None,
     domain: Optional[str] = None,
@@ -64,6 +66,7 @@ async def step_4_6_categorical_value_extraction(
         True
     """
     logger.debug(f"Extracting categorical values for {entity_name}.{categorical_attribute}")
+    cfg = get_phase4_config()
     
     # Build context
     context_parts = []
@@ -74,6 +77,8 @@ async def step_4_6_categorical_value_extraction(
     context_parts.append(f"Attribute: {categorical_attribute}")
     if attribute_description:
         context_parts.append(f"Attribute description: {attribute_description}")
+    if attribute_type:
+        context_parts.append(f"SQL type: {attribute_type}")
     
     context_msg = "\n\nContext:\n" + "\n".join(f"- {part}" for part in context_parts)
     
@@ -110,10 +115,10 @@ Important:
 
 {context}
 
-Natural Language Description:
-{nl_description}
+Return a JSON object with the list of possible values, their source, and reasoning.
 
-Return a JSON object with the list of possible values, their source, and reasoning."""
+IMPORTANT:
+- Do NOT use the original NL description here; decide based on the attribute + its SQL type."""
 
     # Initialize model and create chain
     llm = get_model_for_step("4.6")  # Step 4.6 maps to "high_fanout" task type
@@ -128,7 +133,7 @@ Return a JSON object with the list of possible values, their source, and reasoni
                 "entity_name": entity_name,
                 "categorical_attribute": categorical_attribute,
                 "context": context_msg,
-                "nl_description": nl_description or "",
+                "nl_section": "",
             },
             config=config,
         )
@@ -138,6 +143,49 @@ Return a JSON object with the list of possible values, their source, and reasoni
         
         # Validate that values list is not empty
         values = output_dict.get("values", [])
+
+        # Deterministic type-safety:
+        # - If SQL type is numeric, drop non-numeric categorical values.
+        # - If SQL type is boolean, restrict to true/false (or 0/1).
+        # - If attribute looks like an identifier (*_id), treat it as non-categorical.
+        sql_t = (attribute_type or "").strip().upper()
+        attr_lower = (categorical_attribute or "").lower()
+        if attr_lower.endswith("_id"):
+            output_dict["values"] = []
+            output_dict["source"] = "inferred"
+            output_dict["reasoning"] = "ID-like attribute (*_id) is treated as identifier; categorical values skipped."
+            return output_dict
+
+        def _is_numeric_type(t: str) -> bool:
+            return any(x in t for x in ["INT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIGINT", "SMALLINT"])
+
+        def _is_boolean_type(t: str) -> bool:
+            return "BOOL" in t
+
+        if sql_t:
+            if _is_numeric_type(sql_t):
+                kept: List[str] = []
+                for v in values:
+                    try:
+                        float(str(v))
+                        kept.append(v)
+                    except Exception:
+                        continue
+                output_dict["values"] = kept
+                if not kept and values:
+                    output_dict["reasoning"] = (
+                        (output_dict.get("reasoning") or "")
+                        + " (All suggested values were non-numeric but SQL type is numeric; dropped.)"
+                    ).strip()
+            elif _is_boolean_type(sql_t):
+                allowed = {"true", "false", "0", "1"}
+                kept = [v for v in values if str(v).strip().lower() in allowed]
+                output_dict["values"] = kept
+                if not kept and values:
+                    output_dict["reasoning"] = (
+                        (output_dict.get("reasoning") or "")
+                        + " (SQL type is BOOLEAN; non-boolean values dropped.)"
+                    ).strip()
         if not values:
             logger.warning(
                 f"No values extracted for {entity_name}.{categorical_attribute}. "
@@ -161,6 +209,7 @@ Return a JSON object with the list of possible values, their source, and reasoni
 async def step_4_6_categorical_value_extraction_batch(
     entity_categorical_attributes: Dict[str, List[str]],  # entity_name -> list of categorical attribute names
     entity_attributes: Dict[str, List[Dict[str, Any]]],  # entity_name -> all attributes with descriptions
+    entity_attribute_types: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,  # entity_name -> {attr: type_info}
     nl_description: Optional[str] = None,
     domain: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -200,15 +249,18 @@ async def step_4_6_categorical_value_extraction_batch(
         # Get entity attributes for descriptions
         all_attrs = entity_attributes.get(entity_name, [])
         attr_dict = {extract_attribute_name(attr): attr for attr in all_attrs}
+        attr_types = (entity_attribute_types or {}).get(entity_name, {})
         
         for cat_attr in categorical_attrs:
             attr_info = attr_dict.get(cat_attr, {})
             attr_desc = extract_attribute_description(attr_info) if attr_info else ""
+            attr_type = attr_types.get(cat_attr, {}).get("type") if cat_attr in attr_types else None
             
             task = step_4_6_categorical_value_extraction(
                 entity_name=entity_name,
                 categorical_attribute=cat_attr,
                 attribute_description=attr_desc,
+                attribute_type=attr_type,
                 nl_description=nl_description,
                 domain=domain,
             )

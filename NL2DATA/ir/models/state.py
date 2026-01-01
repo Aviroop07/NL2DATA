@@ -3,6 +3,8 @@
 from typing import Dict, List, Optional, Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 
+from NL2DATA.ir.models.relation_type import RelationType
+
 
 # Supporting models for state components
 
@@ -26,7 +28,7 @@ class EntityInfo(BaseModel):
 class RelationInfo(BaseModel):
     """Relation information from Phase 1."""
     entities: List[str]
-    type: str
+    type: RelationType
     description: str
     arity: int
     reasoning: Optional[str] = None

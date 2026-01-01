@@ -16,8 +16,22 @@ from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_attribute_description,
 )
 from NL2DATA.utils.loops import SafeLoopExecutor, LoopConfig
+from NL2DATA.utils.pipeline_config import get_phase4_config
 
 logger = get_logger(__name__)
+
+def _fd_is_table_local(fd: object, allowed: set[str]) -> bool:
+    lhs = []
+    rhs = []
+    if isinstance(fd, dict):
+        lhs = [a for a in (fd.get("lhs") or []) if isinstance(a, str) and a]
+        rhs = [a for a in (fd.get("rhs") or []) if isinstance(a, str) and a]
+    else:
+        lhs = [a for a in (getattr(fd, "lhs", None) or []) if isinstance(a, str) and a]
+        rhs = [a for a in (getattr(fd, "rhs", None) or []) if isinstance(a, str) and a]
+    if not lhs or not rhs:
+        return False
+    return set(lhs).issubset(allowed) and set(rhs).issubset(allowed)
 
 
 class FunctionalDependency(BaseModel):
@@ -92,6 +106,7 @@ async def step_4_1_functional_dependency_analysis_single(
         True
     """
     logger.debug(f"Analyzing functional dependencies for entity: {entity_name}")
+    cfg = get_phase4_config()
     
     # Build comprehensive context
     context_parts = []
@@ -199,8 +214,7 @@ Return a JSON object with:
 
 {context}
 
-Natural Language Description:
-{nl_description}
+{nl_section}
 
 Return a JSON object specifying all functional dependencies, any additions or removals from previous iterations, and whether you're satisfied with the current list."""
     
@@ -217,6 +231,12 @@ Return a JSON object specifying all functional dependencies, any additions or re
         for reasoning_attempt in range(max_reasoning_retries + 1):
             try:
                 config = get_trace_config("4.1", phase=4, tags=["phase_4_step_1"])
+                nl_section = ""
+                if cfg.step_4_1_include_nl_context and (nl_description or "").strip():
+                    nl_section = f"Natural Language Description:\n{nl_description}\n"
+                else:
+                    nl_section = "Natural Language Description: (omitted)\n"
+
                 result = await standardized_llm_call(
                     llm=llm,
                     output_schema=FunctionalDependencyAnalysisOutput,
@@ -225,7 +245,7 @@ Return a JSON object specifying all functional dependencies, any additions or re
                     input_data={
                         "entity_name": entity_name,
                         "context": current_context_msg,
-                        "nl_description": nl_description or "",
+                        "nl_section": nl_section,
                     },
                     config=config,
                 )
@@ -326,11 +346,11 @@ Return a JSON object specifying all functional dependencies, any additions or re
         
         # Work with Pydantic model directly
         # Validate that mentioned attributes exist and filter out obvious PK → all dependencies
-        all_attr_names = set(attr_names)
+        all_attr_names = set([a for a in attr_names if isinstance(a, str) and a])
         pk_set = set(primary_key)
         
         # Filter out functional dependencies where LHS is PK (or contains PK) and RHS is all other attributes
-        filtered_fds = []
+        filtered_fds: List[FunctionalDependency] = []
         for fd in result.functional_dependencies:
             lhs = fd.lhs
             rhs = fd.rhs
@@ -350,23 +370,24 @@ Return a JSON object specifying all functional dependencies, any additions or re
                 )
                 continue  # Skip this obvious dependency
             
-            # Validate attributes exist
-            for attr in lhs:
-                if attr not in all_attr_names:
-                    logger.warning(
-                        f"Entity {entity_name}: Functional dependency LHS attribute '{attr}' does not exist in attribute list"
-                    )
-            
-            for attr in rhs:
-                if attr not in all_attr_names:
-                    logger.warning(
-                        f"Entity {entity_name}: Functional dependency RHS attribute '{attr}' does not exist in attribute list"
-                    )
-            
+            # Validate attributes exist; drop non-local dependencies (prevents cross-entity leakage)
+            if not _fd_is_table_local(fd, all_attr_names):
+                for attr in lhs:
+                    if attr not in all_attr_names:
+                        logger.warning(
+                            f"Entity {entity_name}: Functional dependency LHS attribute '{attr}' does not exist in attribute list"
+                        )
+                for attr in rhs:
+                    if attr not in all_attr_names:
+                        logger.warning(
+                            f"Entity {entity_name}: Functional dependency RHS attribute '{attr}' does not exist in attribute list"
+                        )
+                continue
+
             filtered_fds.append(fd)
         
         # Also filter should_add and should_remove
-        filtered_should_add = []
+        filtered_should_add: List[FunctionalDependency] = []
         for fd in result.should_add:
             lhs = fd.lhs
             rhs = fd.rhs
@@ -377,16 +398,35 @@ Return a JSON object specifying all functional dependencies, any additions or re
             non_pk_attrs = all_attr_names - pk_set
             is_all_non_pk = non_pk_attrs.issubset(rhs_set) and len(rhs_set) >= len(non_pk_attrs)
             
-            if not (is_pk_superkey and is_all_non_pk):
-                filtered_should_add.append(fd)
+            if is_pk_superkey and is_all_non_pk:
+                continue
+            # Drop any non-local "global suggestions" so the loop won't thrash
+            if not _fd_is_table_local(fd, all_attr_names):
+                continue
+            filtered_should_add.append(fd)
+
+        filtered_should_remove: List[FunctionalDependency] = []
+        for fd in result.should_remove:
+            if _fd_is_table_local(fd, all_attr_names):
+                filtered_should_remove.append(fd)
         
         # Create new model instance if modifications were made
-        if filtered_fds != result.functional_dependencies or filtered_should_add != result.should_add:
+        no_more_changes = result.no_more_changes
+        if not filtered_should_add and not filtered_should_remove:
+            # If the only "changes" were invalid/cross-entity, stop looping.
+            no_more_changes = True
+
+        if (
+            filtered_fds != result.functional_dependencies
+            or filtered_should_add != result.should_add
+            or filtered_should_remove != result.should_remove
+            or no_more_changes != result.no_more_changes
+        ):
             result = FunctionalDependencyAnalysisOutput(
                 functional_dependencies=filtered_fds,
                 should_add=filtered_should_add,
-                should_remove=result.should_remove,
-                no_more_changes=result.no_more_changes,
+                should_remove=filtered_should_remove,
+                no_more_changes=no_more_changes,
                 reasoning=result.reasoning  # Preserve reasoning if it exists
             )
         

@@ -39,10 +39,17 @@ class IRGenerationState(TypedDict, total=False):
     primary_keys: Dict[str, List[str]]  # entity -> list of PK attribute names
     foreign_keys: List[Dict[str, Any]]  # List of foreign key definitions
     constraints: Annotated[List[Dict[str, Any]], add]  # Accumulated constraints
+    # Derived attribute DSLs (Phase 2.9)
+    # Flat maps keyed by "Entity.attribute" for deterministic gate checks.
+    derived_formulas: Dict[str, Dict[str, Any]]
+    derived_metrics: Dict[str, Dict[str, Any]]
+    # Optional composite decomposition DSLs (Phase 2.4)
+    composite_decompositions: Dict[str, Any]
     
     # Phase 3: Query Requirements & Schema Refinement
     information_needs: Annotated[List[Dict[str, Any]], add]  # Accumulated information needs
     sql_queries: Annotated[List[Dict[str, Any]], add]  # Accumulated SQL queries
+    junction_table_names: Dict[str, str]  # relation_key (sorted entity names) -> suggested table name
     
     # Phase 4: Functional Dependencies & Data Types
     functional_dependencies: Annotated[List[Dict[str, Any]], add]  # Accumulated FDs
@@ -96,6 +103,9 @@ def create_initial_state(nl_description: str) -> IRGenerationState:
         "primary_keys": {},
         "foreign_keys": [],
         "constraints": [],
+        "derived_formulas": {},
+        "derived_metrics": {},
+        "composite_decompositions": {},
         "information_needs": [],
         "sql_queries": [],
         "functional_dependencies": [],

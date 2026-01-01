@@ -1,7 +1,8 @@
-"""Pipeline logger utility for capturing LLM responses, tool calls, ER diagrams, and schemas.
+"""Pipeline logger utility for capturing coherent LLM request/response pairs.
 
-This module provides a centralized logging mechanism that writes all pipeline
-intermediate outputs to a text file for debugging and analysis.
+Standard rule for this project:
+- Log entries must be request+response pairs in a single, coherent block.
+- Avoid extra sections (tool calls, partial outputs, schemas) in the pipeline log.
 """
 
 import json
@@ -14,6 +15,34 @@ from threading import Lock
 from NL2DATA.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _serialize_messages_for_api(messages_sent: List[Any]) -> List[Dict[str, Any]]:
+    """
+    Convert LangChain messages to a stable, OpenAI-like wire format:
+    [{"role": "system"|"user"|"assistant"|"tool", "content": "..."}].
+
+    We intentionally omit tool_calls/tool_call_id to keep the pipeline log minimal and coherent.
+    """
+    serialized: List[Dict[str, Any]] = []
+    for msg in messages_sent:
+        if hasattr(msg, "dict"):
+            msg_dict = msg.dict()
+            msg_type = (msg_dict.get("type", "") or "").replace("message", "").lower()
+            role = "user"
+            if msg_type in {"system"}:
+                role = "system"
+            elif msg_type in {"human"}:
+                role = "user"
+            elif msg_type in {"ai", "assistant"}:
+                role = "assistant"
+            elif msg_type in {"tool"}:
+                role = "tool"
+            serialized.append({"role": role, "content": msg_dict.get("content", "")})
+        else:
+            # Best-effort fallback
+            serialized.append({"role": "user", "content": str(msg)})
+    return serialized
 
 
 class PipelineLogger:
@@ -60,8 +89,7 @@ class PipelineLogger:
         self._write_line(f"Started at: {datetime.now().isoformat()}")
         self._write_separator()
         self.file_handle.flush()
-        
-        logger.info(f"Pipeline logger initialized: {self.output_file}")
+        # Intentionally avoid emitting INFO logs from the pipeline logger itself.
     
     def _write_separator(self, char: str = "=", length: int = 80):
         """Write a separator line."""
@@ -86,165 +114,62 @@ class PipelineLogger:
         attempt_number: Optional[int] = None,
         llm_params: Optional[Dict[str, Any]] = None,
     ):
-        """
-        Log an LLM call with its prompt, response, and tool calls.
-        
-        Args:
-            step_name: Name of the step (e.g., "Phase 1.1: Domain Detection")
-            prompt: The prompt sent to the LLM (legacy, for backward compatibility)
-            input_data: Input data dictionary
-            response: The LLM response (can be Pydantic model or dict) - parsed/final response
-            tool_calls: List of tool calls made by the LLM
-            tool_results: List of tool call results
-            messages_sent: List of actual LangChain messages sent to LLM (SystemMessage, HumanMessage, etc.)
-            raw_response: Raw response from LLM before parsing (AIMessage object)
-            attempt_number: Retry attempt number if this is a retry
+        """Log a single coherent REQUEST/RESPONSE pair.
+
+        Notes:
+        - We intentionally do not log tool calls/results, raw response metadata, schemas, etc.
+        - We use ASCII-safe JSON (`ensure_ascii=True`) to avoid Windows console/log issues.
         """
         if not self.file_handle:
             return
         
         self._write_separator()
-        self._write_line(f"LLM CALL: {step_name}")
+        self._write_line(f"LLM_CALL: {step_name}")
         if attempt_number:
             self._write_line(f"ATTEMPT: {attempt_number}")
         self._write_line(f"Timestamp: {datetime.now().isoformat()}")
         self._write_separator("-")
         
-        # Only log serialized message list (as sent to API)
+        # REQUEST
         if messages_sent:
-            try:
-                serialized_messages = []
-                for msg in messages_sent:
-                    # Convert message to the exact format sent to OpenAI API
-                    if hasattr(msg, 'dict'):
-                        msg_dict = msg.dict()
-                        # Extract only the fields that go to the API
-                        api_msg = {
-                            "role": msg_dict.get("type", "").replace("message", "").lower() or "user",
-                            "content": msg_dict.get("content", ""),
-                        }
-                        # Fix role names to match OpenAI API format
-                        if api_msg["role"] == "system":
-                            api_msg["role"] = "system"
-                        elif api_msg["role"] == "human":
-                            api_msg["role"] = "user"
-                        elif api_msg["role"] == "ai":
-                            api_msg["role"] = "assistant"
-                        elif api_msg["role"] == "tool":
-                            api_msg["role"] = "tool"
-                        
-                        # Add tool_calls if present
-                        if msg_dict.get("tool_calls"):
-                            api_msg["tool_calls"] = msg_dict["tool_calls"]
-                        
-                        # Add tool_call_id if present (for tool messages)
-                        if msg_dict.get("tool_call_id"):
-                            api_msg["tool_call_id"] = msg_dict["tool_call_id"]
-                        
-                        serialized_messages.append(api_msg)
-                
-                self._write_line("--- Serialized Message List (as sent to API) ---")
-                self._write_line(json.dumps(serialized_messages, indent=2, ensure_ascii=False))
-                self._write_line("--- End Serialized Message List ---")
-            except Exception as e:
-                self._write_line(f"Error serializing messages to API format: {e}")
-        
-        # Log tool calls if available
-        if tool_calls:
-            self._write_line("\n=== TOOL CALLS ===")
-            try:
-                for i, tool_call in enumerate(tool_calls, 1):
-                    self._write_line(f"\nTool Call {i}:")
-                    self._write_line(json.dumps(tool_call, indent=2, default=str))
-            except Exception as e:
-                self._write_line(f"Error serializing tool calls: {e}")
-                self._write_line(str(tool_calls))
-            self._write_line("=== END TOOL CALLS ===\n")
-        
-        # Log tool results if available
-        if tool_results:
-            self._write_line("\n=== TOOL RESULTS ===")
-            try:
-                for i, tool_result in enumerate(tool_results, 1):
-                    self._write_line(f"\nTool Result {i}:")
-                    self._write_line(json.dumps(tool_result, indent=2, default=str))
-            except Exception as e:
-                self._write_line(f"Error serializing tool results: {e}")
-                self._write_line(str(tool_results))
-            self._write_line("=== END TOOL RESULTS ===\n")
-        
-        # Only log parsed/final response
-        if response is not None:
-            self._write_line("\n=== PARSED/FINAL RESPONSE ===")
-            try:
-                # Handle Pydantic models
-                if hasattr(response, 'model_dump'):
-                    response_dict = response.model_dump()
-                    self._write_line(json.dumps(response_dict, indent=2, default=str))
-                elif isinstance(response, dict):
-                    self._write_line(json.dumps(response, indent=2, default=str))
-                else:
-                    self._write_line(str(response))
-            except Exception as e:
-                self._write_line(f"Error serializing response: {e}")
+            payload = _serialize_messages_for_api(messages_sent)
+            self._write_line("REQUEST:")
+            self._write_line(json.dumps(payload, indent=2, ensure_ascii=True, default=str))
+        elif prompt:
+            self._write_line("REQUEST:")
+            self._write_line(str(prompt))
+        elif input_data is not None:
+            self._write_line("REQUEST:")
+            self._write_line(json.dumps(input_data, indent=2, ensure_ascii=True, default=str))
+        else:
+            self._write_line("REQUEST:")
+            self._write_line("(unavailable)")
+
+        # RESPONSE (prefer parsed/final)
+        self._write_line("")
+        self._write_line("RESPONSE:")
+        if response is None and raw_response is not None:
+            response = raw_response
+
+        try:
+            if hasattr(response, "model_dump"):
+                self._write_line(json.dumps(response.model_dump(), indent=2, ensure_ascii=True, default=str))
+            elif isinstance(response, dict):
+                self._write_line(json.dumps(response, indent=2, ensure_ascii=True, default=str))
+            elif hasattr(response, "content"):
+                self._write_line(str(getattr(response, "content", "")))
+            else:
                 self._write_line(str(response))
-            self._write_line("=== END PARSED RESPONSE ===\n")
+        except Exception as e:
+            self._write_line(f"(failed to serialize response: {e})")
+            self._write_line(str(response))
         
         self._write_separator()
         self._write_line()
         self.file_handle.flush()
     
-    def log_er_diagram(self, step_name: str, er_design: Dict[str, Any]):
-        """
-        Log an ER diagram/schema.
-        
-        Args:
-            step_name: Name of the step (e.g., "Phase 3.4: ER Design Compilation")
-            er_design: ER design dictionary
-        """
-        if not self.file_handle:
-            return
-        
-        self._write_separator()
-        self._write_line(f"ER DIAGRAM: {step_name}")
-        self._write_line(f"Timestamp: {datetime.now().isoformat()}")
-        self._write_separator("-")
-        
-        try:
-            self._write_line(json.dumps(er_design, indent=2, default=str))
-        except Exception as e:
-            self._write_line(f"Error serializing ER design: {e}")
-            self._write_line(str(er_design))
-        
-        self._write_separator()
-        self._write_line()
-        self.file_handle.flush()
-    
-    def log_schema(self, step_name: str, schema: Dict[str, Any]):
-        """
-        Log a relational schema.
-        
-        Args:
-            step_name: Name of the step (e.g., "Phase 3.5: Relational Schema Compilation")
-            schema: Schema dictionary
-        """
-        if not self.file_handle:
-            return
-        
-        self._write_separator()
-        self._write_line(f"RELATIONAL SCHEMA: {step_name}")
-        self._write_line(f"Timestamp: {datetime.now().isoformat()}")
-        self._write_separator("-")
-        
-        try:
-            self._write_line(json.dumps(schema, indent=2, default=str))
-        except Exception as e:
-            self._write_line(f"Error serializing schema: {e}")
-            self._write_line(str(schema))
-        
-        self._write_separator()
-        self._write_line()
-        self.file_handle.flush()
+    # NOTE: We intentionally do not provide schema/ER-diagram logging here anymore.
+    # If needed later, implement a separate artifact writer that writes to files, not logs.
     
     def log_intermediate_output(self, step_name: str, output: Any, output_type: str = "INTERMEDIATE OUTPUT"):
         """

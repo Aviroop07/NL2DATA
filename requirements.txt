@@ -1,11 +1,21 @@
 # Core dependencies
 openai>=1.0.0
-langchain>=0.1.0
-langchain-core>=0.1.0
-langchain-openai>=0.0.5
-langgraph>=0.0.20  # For StateGraph orchestration
+
+# LangChain stack (pinned for compatibility)
+langchain==0.3.27
+langchain-core==0.3.81
+langchain-openai==0.2.14
+
+# LangGraph orchestration (pinned to avoid dependency resolver backtracking)
+langgraph==1.0.1
+langgraph-prebuilt==1.0.1
+langgraph-sdk==0.2.15
+
 langsmith>=0.1.0    # For observability and tracing
 pydantic>=2.0.0
 pyyaml>=6.0.0
 python-dotenv>=1.0.0
 
+# Optional (recommended): deterministic semantic similarity for Phase 2 Step 2.3
+sentence-transformers>=2.6.0
+lark>=1.1.9

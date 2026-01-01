@@ -16,6 +16,7 @@ from NL2DATA.phases.phase1 import (
     step_1_6_auxiliary_entity_suggestion,
     step_1_7_entity_consolidation,
     step_1_75_entity_relation_reclassification,
+    step_1_76_entity_attribute_guardrail,
     step_1_8_entity_cardinality,
     step_1_9_key_relations_extraction,
     step_1_10_schema_connectivity_with_loop,
@@ -35,16 +36,17 @@ from NL2DATA.phases.phase2 import (
     step_2_10_unique_constraints_batch,
     step_2_11_nullability_constraints_batch,
     step_2_12_default_values_batch,
-    step_2_13_check_constraints_batch,
-    add_foreign_key_attributes_to_entities,
-    remove_redundant_relationship_attributes,
-    step_2_14_relation_realization_batch,
+)
+from NL2DATA.phases.phase2.step_2_14_entity_cleanup import step_2_14_entity_cleanup_batch
+from NL2DATA.phases.phase2.step_2_16_cross_entity_attribute_reconciliation import (
+    step_2_16_cross_entity_attribute_reconciliation_batch,
 )
 from NL2DATA.phases.phase3 import (
     step_3_1_information_need_identification_with_loop,
     step_3_2_information_completeness_batch,
     step_3_3_phase2_reexecution,
     step_3_4_er_design_compilation,
+    step_3_45_junction_table_naming,
     step_3_5_relational_schema_compilation,
 )
 from NL2DATA.phases.phase4 import (
@@ -82,6 +84,10 @@ from NL2DATA.utils.logging import setup_logging, get_logger
 from NL2DATA.config import get_config
 from NL2DATA.utils.rate_limiting.singleton import reset_rate_limiter
 from NL2DATA.tests.utils.debug_dump import log_json
+from NL2DATA.tests.utils.phase_artifact_dump import dump_phase_artifacts
+from NL2DATA.utils.fd import seed_functional_dependencies_from_derived_formulas
+from NL2DATA.tests.utils.phase_timing import timer_start, timer_elapsed_seconds, log_phase_duration
+from NL2DATA.utils.pipeline_config import get_phase3_config
 
 def read_nl_descriptions(file_path: str) -> List[str]:
     """Read all NL descriptions from a text file, separated by double newlines."""
@@ -97,6 +103,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(
     description_index: int = None,
     max_phase: int = None,
     log_file_override: str = None,
+    return_state: bool = False,
 ):
     """Test Phases 1, 2, 3, 4, 5, 6, and 7 with a single NL description.
     
@@ -128,8 +135,20 @@ async def test_phases_1_2_3_4_5_6_7_integration(
     print(f"{index_prefix}Integration Test: Phases 1, 2, 3, 4, 5, 6, and 7")
     print("=" * 80)
     
-    # Replace Unicode characters for Windows console compatibility
-    nl_description_display = nl_description.replace('\u2192', '->').replace('\u00d7', 'x')
+    def _ascii_safe(s: object) -> str:
+        """Best-effort ASCII-safe string for Windows consoles (no crashes)."""
+        try:
+            txt = str(s or "")
+        except Exception:
+            txt = ""
+        txt = txt.replace('\u2192', '->').replace('\u00d7', 'x')
+        try:
+            return txt.encode("ascii", errors="replace").decode("ascii")
+        except Exception:
+            return str(txt)
+
+    # Replace Unicode characters for Windows console compatibility.
+    nl_description_display = _ascii_safe(nl_description)
     print(f"\nNatural Language Description:\n{nl_description_display}\n")
     
     all_passed = True
@@ -139,6 +158,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         # ========================================================================
         # PHASE 1: Domain & Entity Discovery
         # ========================================================================
+        phase_1_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 1: Domain & Entity Discovery")
         print("=" * 80)
@@ -185,7 +205,9 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         state["key_entities"] = key_entities
         print(f"  Key entities: {len(key_entities)}")
         for entity in key_entities[:5]:
-            print(f"    - {entity.get('name', '')}: {entity.get('description', '')}")
+            name = _ascii_safe(entity.get("name", ""))
+            desc = _ascii_safe(entity.get("description", ""))
+            print(f"    - {name}: {desc}")
         
         # Step 1.5: Relation Mention Detection
         print("\n[Phase 1.5] Relation Mention Detection...")
@@ -231,6 +253,21 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         print(f"  Reclassified/removed associative entities: {len(removed)}")
         if removed:
             for name in removed:
+                print(f"    - {name}")
+
+        # Step 1.76: Entity vs Attribute Guardrail (deterministic)
+        print("\n[Phase 1.76] Entity vs Attribute Guardrail...")
+        result_1_76 = await step_1_76_entity_attribute_guardrail(
+            consolidated_entities, nl_description, domain=inferred_domain
+        )
+        log_json(logger, "Phase 1.76 Entity vs Attribute Guardrail result", result_1_76)
+        consolidated_entities = result_1_76.get("entities", consolidated_entities)
+        state["entities"] = consolidated_entities
+        state["attribute_candidates_phase1"] = result_1_76.get("attribute_candidates", [])
+        removed_attr = result_1_76.get("removed_entity_names", [])
+        print(f"  Reclassified/removed attribute-like entities: {len(removed_attr)}")
+        if removed_attr:
+            for name in removed_attr:
                 print(f"    - {name}")
         
         # Step 1.8: Entity Cardinality
@@ -288,6 +325,51 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         log_json(logger, "Phase 1.11 Relation Cardinality result", result_1_11)
         # Step 1.11 returns {"relation_cardinalities": [list]} - convert to dict keyed by relation_id
         relation_cardinalities_list = result_1_11.get("relation_cardinalities", [])
+        # Persist raw Step 1.11 outputs in state (useful for debugging and downstream artifacts).
+        state["relation_cardinalities"] = relation_cardinalities_list
+
+        # IMPORTANT:
+        # Merge Step 1.11 results back into the relation objects so Phase 1 end artifacts
+        # (state["relations"] / er_diagram_phase1) include cardinalities + participations.
+        #
+        # Step 1.11 preserves input order, so we primarily zip by index; fall back to
+        # entity-set matching if needed.
+        enriched_relations = []
+        try:
+            # Build fallback lookup by entity-set
+            by_key = {}
+            for rc in relation_cardinalities_list or []:
+                ents = rc.get("entities", []) or []
+                if ents:
+                    by_key[tuple(sorted(ents))] = rc
+
+            for rel, rc in zip(key_relations or [], relation_cardinalities_list or []):
+                rel_ents = rel.get("entities", []) or []
+                rc_ents = rc.get("entities", []) or []
+                # Prefer index-aligned merge when entities match; otherwise try key lookup.
+                if rel_ents and rc_ents and tuple(rel_ents) == tuple(rc_ents):
+                    rel2 = dict(rel)
+                    rel2["entity_cardinalities"] = rc.get("entity_cardinalities")
+                    rel2["entity_participations"] = rc.get("entity_participations")
+                    enriched_relations.append(rel2)
+                else:
+                    rel2 = dict(rel)
+                    hit = by_key.get(tuple(sorted(rel_ents))) if rel_ents else None
+                    if isinstance(hit, dict):
+                        rel2["entity_cardinalities"] = hit.get("entity_cardinalities")
+                        rel2["entity_participations"] = hit.get("entity_participations")
+                    enriched_relations.append(rel2)
+
+            # If there were more relations than cardinality results (shouldn't happen),
+            # append the remaining relations unchanged.
+            if len(enriched_relations) < len(key_relations or []):
+                for rel in (key_relations or [])[len(enriched_relations):]:
+                    enriched_relations.append(dict(rel))
+        except Exception:
+            enriched_relations = [dict(r) for r in (key_relations or [])]
+
+        key_relations = enriched_relations
+        state["relations"] = key_relations
         # Convert list to dict using same relation_id format as step_2_14: "Entity1+Entity2"
         relation_results_1_11 = {}
         for rel_card in relation_cardinalities_list:
@@ -306,21 +388,34 @@ async def test_phases_1_2_3_4_5_6_7_integration(
             consolidated_entities, key_relations, relation_cardinalities=relation_cardinalities_list,
             nl_description=nl_description, max_iterations=5, max_time_sec=180
         )
-        log_json(logger, "Phase 1.12 Relation Validation (with loop) result", result_1_12)
+        # Keep file logging minimal/standardized: LLM request/response pairs are handled by PipelineLogger.
+        # Avoid dumping large intermediate JSON blobs to the run log.
         validation_result = result_1_12.get("final_result", {})
-        log_json(logger, "Phase 1.12 validation_result (derived)", validation_result)
         print(f"  Relation validation: {validation_result.get('validation_passed', False)}")
         
         print("\n[PASS] Phase 1 completed")
-        log_json(logger, "Phase 1 state snapshot", state)
+        phase_1_sec = timer_elapsed_seconds(phase_1_t0)
+        log_phase_duration(logger, phase=1, seconds=phase_1_sec)
+        print(f"[Timing] Phase 1 took {phase_1_sec:.2f} seconds")
+        # Avoid dumping full state to the run log (huge). Artifacts can be written separately if needed.
+        # Provide a lightweight ER-style snapshot early (entities + relations) so Phase 1
+        # has a concrete "ER diagram" artifact even before Phase 3's compiled ER design.
+        state["er_diagram_phase1"] = {
+            "entities": state.get("entities", []),
+            "relations": state.get("relations", []),
+        }
+        # Artifacts are intentionally not dumped to logs by default (keeps repo + logs clean).
 
         if max_phase and max_phase < 2:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 1.")
+            if return_state:
+                return {"success": all_passed, "state": state}
             return all_passed
         
         # ========================================================================
         # PHASE 2: Attribute Discovery & Schema Design
         # ========================================================================
+        phase_2_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 2: Attribute Discovery & Schema Design")
         print("=" * 80)
@@ -334,7 +429,11 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         # Step 2.2: Intrinsic Attributes
         print("\n[Phase 2.2] Intrinsic Attributes...")
         result_2_2 = await step_2_2_intrinsic_attributes_batch(
-            consolidated_entities, nl_description, domain=inferred_domain
+            consolidated_entities,
+            nl_description,
+            domain=inferred_domain,
+            relations=key_relations,
+            primary_keys=state.get("primary_keys", {}),
         )
         entity_attr_results = result_2_2.get("entity_results", {})
         entity_attributes = {}
@@ -350,6 +449,25 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         )
         synonym_results = result_2_3.get("entity_results", {})
         print(f"  Synonyms detected for {len(synonym_results)} entities")
+
+        # Apply updated attributes if provided (LLM decided; we apply deterministically)
+        updated_attrs = result_2_3.get("updated_attributes", {})
+        if isinstance(updated_attrs, dict) and updated_attrs:
+            entity_attributes = updated_attrs
+            state["attributes"] = entity_attributes
+
+        # Step 2.16: Cross-Entity Attribute Reconciliation (double precaution)
+        print("\n[Phase 2.16] Cross-Entity Attribute Reconciliation...")
+        result_2_16 = await step_2_16_cross_entity_attribute_reconciliation_batch(
+            entities=consolidated_entities,
+            attributes=entity_attributes,
+            relations=key_relations,
+            nl_description=nl_description,
+            domain=inferred_domain,
+        )
+        entity_attributes = result_2_16.get("updated_attributes", entity_attributes)
+        state["attributes"] = entity_attributes
+        print(f"  Cross-entity reconciliation processed for {len((result_2_16.get('entity_results') or {}))} entities")
         
         # Step 2.4: Composite Attribute Handling
         print("\n[Phase 2.4] Composite Attribute Handling...")
@@ -395,6 +513,29 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         }
         state["primary_keys"] = entity_primary_keys
         print(f"  Primary keys identified for {len(entity_primary_keys)} entities")
+
+        # If Step 2.7 chose a surrogate key not present in the attribute list, propagate it into attributes now.
+        # This prevents downstream steps (2.8+, relational compilation, Phase 4) from operating on a PK column that doesn't exist.
+        for ent_name, pk_list in (entity_primary_keys or {}).items():
+            if not isinstance(pk_list, list):
+                continue
+            for pk_attr in pk_list:
+                if not isinstance(pk_attr, str) or not pk_attr.strip():
+                    continue
+                if pk_attr not in (entity_attr_lists.get(ent_name) or []):
+                    entity_attr_lists.setdefault(ent_name, []).append(pk_attr)
+                # Ensure full attribute objects exist too
+                attrs_obj_list = entity_attributes.get(ent_name) or []
+                existing_names = {
+                    (a.get("name") if isinstance(a, dict) else getattr(a, "name", ""))
+                    for a in attrs_obj_list
+                }
+                if pk_attr not in existing_names:
+                    attrs_obj_list.append(
+                        {"name": pk_attr, "description": "Surrogate primary key (auto-added)", "type_hint": "integer"}
+                    )
+                    entity_attributes[ent_name] = attrs_obj_list
+        state["attributes"] = entity_attributes
         
         # Step 2.8: Multivalued/Derived Detection
         print("\n[Phase 2.8] Multivalued/Derived Detection...")
@@ -421,7 +562,58 @@ async def test_phases_1_2_3_4_5_6_7_integration(
             entity_derived_attrs, entity_attr_lists, entity_descriptions=entity_descriptions, nl_description=nl_description
         )
         formula_results = result_2_9.get("entity_results", {})
+        metric_results = result_2_9.get("entity_metrics", {}) or {}
         print(f"  Derived attribute formulas extracted for {len(formula_results)} entities")
+        metric_entity_count = len([k for k, v in (metric_results or {}).items() if isinstance(v, dict) and v])
+        if metric_entity_count:
+            print(f"  Aggregate/query-level metrics detected for {metric_entity_count} entities (stored separately)")
+
+        # Store in state for phase gates and later phases:
+        # - derived_formulas: flat map keyed by "Entity.attr"
+        # - derived_metrics: flat map keyed by "Entity.attr"
+        derived_formulas_flat = {}
+        for ent, mp in (formula_results or {}).items():
+            if not isinstance(mp, dict):
+                continue
+            for attr, info in mp.items():
+                if isinstance(attr, str) and attr and isinstance(info, dict):
+                    derived_formulas_flat[f"{ent}.{attr}"] = info
+        derived_metrics_flat = {}
+        for ent, mp in (metric_results or {}).items():
+            if not isinstance(mp, dict):
+                continue
+            for attr, info in mp.items():
+                if isinstance(attr, str) and attr and isinstance(info, dict):
+                    derived_metrics_flat[f"{ent}.{attr}"] = info
+        state["derived_formulas"] = derived_formulas_flat
+        state["derived_metrics"] = derived_metrics_flat
+
+        # Deterministic FD seeding BEFORE Phase 3:
+        # Any derived attribute is functionally determined by its dependencies.
+        # We store these as an initial FD set; Step 4.1 (LLM) can add more later.
+        try:
+            # Do not seed FDs from aggregate/query-level metrics or invalid formulas.
+            row_level_only = {}
+            for ent, mp in (formula_results or {}).items():
+                if not isinstance(mp, dict):
+                    continue
+                for attr, info in mp.items():
+                    if not isinstance(attr, str) or not attr or not isinstance(info, dict):
+                        continue
+                    if bool(info.get("is_aggregate_metric", False)):
+                        continue
+                    if info.get("validation_errors"):
+                        continue
+                    if not str(info.get("formula", "") or "").strip():
+                        continue
+                    row_level_only.setdefault(ent, {})[attr] = info
+            fd_seed = seed_functional_dependencies_from_derived_formulas(row_level_only)
+        except Exception as e:
+            logger.warning(f"Failed to seed functional dependencies from derived formulas: {e}")
+            fd_seed = {}
+        state["functional_dependencies"] = fd_seed
+        total_seed_fds = sum(len(v) for v in (fd_seed or {}).values())
+        print(f"  Seeded functional dependencies from derived attributes: {total_seed_fds} total across {len(fd_seed)} entities")
         
         # Step 2.10: Unique Constraints
         print("\n[Phase 2.10] Unique Constraints...")
@@ -447,101 +639,50 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         default_results = result_2_12.get("entity_results", {})
         print(f"  Default values identified for {len(default_results)} entities")
         
-        # Step 2.13: Check Constraints
-        print("\n[Phase 2.13] Check Constraints...")
-        result_2_13 = await step_2_13_check_constraints_batch(
-            consolidated_entities, entity_attr_lists, nl_description, domain=inferred_domain
+        # Step 2.13: Check Constraints (disabled for now; requires finalized relational schema)
+        # Step 2.14: Entity Cleanup (LLM-driven; no Python deletions)
+        print("\n[Phase 2.14] Entity Cleanup (relation-connecting attribute cleanup)...")
+        result_2_14 = await step_2_14_entity_cleanup_batch(
+            entities=consolidated_entities,
+            entity_attributes=entity_attributes,
+            primary_keys=entity_primary_keys,
+            relations=key_relations,
+            nl_description=nl_description,
+            domain=inferred_domain,
         )
-        check_results = result_2_13.get("entity_results", {})
-        print(f"  Check constraints identified for {len(check_results)} entities")
-        
-        # Step 2.14: Relation Realization
-        print("\n[Phase 2.14] Relation Realization...")
-        result_2_14 = await step_2_14_relation_realization_batch(
-            key_relations, consolidated_entities, entity_primary_keys, entity_attr_lists,
-            relation_cardinalities=relation_results_1_11,  # Pass cardinalities from Step 1.11
-            nl_description=nl_description, domain=inferred_domain
-        )
-        fk_results = result_2_14.get("relation_results", {})
-        
-        # CRITICAL: Add FK attributes to entity attribute lists when needs_creation=True
-        # Convert entity_attr_lists to the format expected by add_foreign_key_attributes_to_entities
-        entity_attributes_dict = {}
-        for entity_name, attr_list in entity_attr_lists.items():
-            # Convert list of attribute names to list of attribute dicts
-            entity_attributes_dict[entity_name] = [
-                {"name": attr_name} if isinstance(attr_name, str) else attr_name
-                for attr_name in attr_list
-            ]
-        
-        # Add FK attributes to entities
-        entity_attributes_dict = add_foreign_key_attributes_to_entities(
-            fk_results, entity_attributes_dict, key_relations
-        )
-        
-        # CRITICAL: Remove redundant relationship attributes (e.g., "sensor_type" string when "sensor_type_id" FK exists)
-        # This uses both LLM-identified redundant attributes (from Step 2.14) and deterministic pattern matching
-        entity_attributes_dict = remove_redundant_relationship_attributes(
-            entity_attributes_dict, fk_results, key_relations
-        )
-        
-        # Update entity_attr_lists with the new FK attributes (after removal of redundant ones)
-        for entity_name, attr_list in entity_attributes_dict.items():
-            entity_attr_lists[entity_name] = [
-                attr.get("name") if isinstance(attr, dict) else getattr(attr, "name", "")
-                for attr in attr_list
-            ]
-        
-        # Build foreign_keys list for downstream steps
+        cleaned_attrs = result_2_14.get("updated_attributes", {}) or {}
+        if isinstance(cleaned_attrs, dict) and cleaned_attrs:
+            entity_attributes = cleaned_attrs
+            state["attributes"] = entity_attributes
+
+        # Rebuild name-only lists for downstream steps
+        entity_attr_lists = {
+            name: [attr.get("name") if isinstance(attr, dict) else getattr(attr, "name", "") for attr in attrs]
+            for name, attrs in entity_attributes.items()
+        }
+
+        # Foreign keys are constructed later during relational schema compilation
         foreign_keys = []
-        for rel_id, rel_result in fk_results.items():
-            # rel_result is the direct output from Step 2.14, not nested
-            if rel_result.get("realization_type") == "foreign_key":
-                fk_attrs = rel_result.get("realization_attrs", {})
-                # Find which entity this relation belongs to
-                rel_entities = []
-                for relation in key_relations:
-                    relation_entities = relation.get("entities", [])
-                    relation_id = f"{'+'.join(sorted(relation_entities))}"
-                    if relation_id == rel_id:
-                        rel_entities = relation_entities
-                        break
-                
-                if rel_entities:
-                    # Determine which entity gets the FK (the one that's not the referenced entity)
-                    for fk_attr, ref in fk_attrs.items():
-                        # Parse reference (e.g., "SensorType.sensor_type_id")
-                        if "." in ref:
-                            ref_table, ref_attr = ref.split(".", 1)
-                            # Find target entity (the one that's not the referenced entity)
-                            target_entity = None
-                            for entity_name in rel_entities:
-                                if entity_name != ref_table:
-                                    target_entity = entity_name
-                                    break
-                            
-                            if target_entity:
-                                foreign_keys.append({
-                                    "from_entity": target_entity,
-                                    "to_entity": ref_table,
-                                    "attributes": [fk_attr],
-                                    "referenced_attributes": [ref_attr],
-                                    "referential_integrity": rel_result.get("referential_integrity", {}).get(fk_attr),
-                                })
-        
         state["foreign_keys"] = foreign_keys
-        state["entity_attributes"] = entity_attributes_dict  # Store full attribute dicts, not just names
-        print(f"  Relations realized: {len(fk_results)} relations processed, {len(foreign_keys)} foreign keys created")
+        state["entity_attributes"] = entity_attributes
+        print(f"  Entity cleanup completed for {len(cleaned_attrs)} entities; foreign keys deferred")
         
         print("\n[PASS] Phase 2 completed")
+        phase_2_sec = timer_elapsed_seconds(phase_2_t0)
+        log_phase_duration(logger, phase=2, seconds=phase_2_sec)
+        print(f"[Timing] Phase 2 took {phase_2_sec:.2f} seconds")
+        # Avoid duplicate timing logs and large artifact dumps.
         
         if max_phase and max_phase < 3:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 2.")
+            if return_state:
+                return {"success": all_passed, "state": state}
             return all_passed
         
         # ========================================================================
         # PHASE 3: Query Requirements & Schema Refinement
         # ========================================================================
+        phase_3_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 3: Query Requirements & Schema Refinement")
         print("=" * 80)
@@ -562,10 +703,12 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         
         # Step 3.2: Information Completeness Check
         print("\n[Phase 3.2] Information Completeness Check...")
+        phase3_cfg = get_phase3_config()
         result_3_2 = await step_3_2_information_completeness_batch(
             information_needs, consolidated_entities, key_relations, entity_attributes,
             entity_primary_keys, foreign_keys, nl_description=nl_description, domain=inferred_domain,
-            max_iterations=3, max_time_sec=180
+            max_iterations=phase3_cfg.step_3_2_max_iterations,
+            max_time_sec=phase3_cfg.step_3_2_max_time_sec,
         )
         completeness_results = result_3_2.get("completeness_results", {})
         print(f"  Completeness checked for {len(completeness_results)} information needs")
@@ -659,10 +802,26 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         state["er_design"] = er_design
         print(f"  ER design compiled: {len(er_design.get('entities', []))} entities, {len(er_design.get('relations', []))} relations")
         
+        # Step 3.45: Junction Table Naming
+        print("\n[Phase 3.45] Junction Table Naming...")
+        junction_table_names = await step_3_45_junction_table_naming(
+            relations=er_design.get("relations", []),
+            entities=er_design.get("entities", []),
+            nl_description=nl_description,
+            domain=state.get("domain"),
+        )
+        state["junction_table_names"] = junction_table_names
+        if junction_table_names:
+            print(f"  Named {len(junction_table_names)} junction tables")
+            for rel_key, name in list(junction_table_names.items())[:3]:
+                print(f"    - {rel_key} -> {name}")
+        else:
+            print("  No junction tables needed")
+        
         # Step 3.5: Relational Schema Compilation
         print("\n[Phase 3.5] Relational Schema Compilation...")
         relational_schema = step_3_5_relational_schema_compilation(
-            er_design, foreign_keys, entity_primary_keys
+            er_design, foreign_keys, entity_primary_keys, constraints=state.get("constraints"), junction_table_names=junction_table_names
         )
         state["relational_schema"] = relational_schema
         tables = relational_schema.get("tables", [])
@@ -671,11 +830,23 @@ async def test_phases_1_2_3_4_5_6_7_integration(
             print(f"    - {table.get('name', '')}: {len(table.get('columns', []))} columns")
         
         print("\n[PASS] Phase 3 completed")
+        phase_3_sec = timer_elapsed_seconds(phase_3_t0)
+        log_phase_duration(logger, phase=3, seconds=phase_3_sec)
+        print(f"[Timing] Phase 3 took {phase_3_sec:.2f} seconds")
+        dump_phase_artifacts(logger=logger, phase=3, state=state)
+
+        # Respect max_phase: stop before entering Phase 4.
+        if max_phase and max_phase < 4:
+            print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 3.")
+            if return_state:
+                return {"success": all_passed, "state": state}
+            return all_passed
         
         
         # ========================================================================
         # PHASE 4: Functional Dependencies & Data Types
         # ========================================================================
+        phase_4_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 4: Functional Dependencies & Data Types")
         print("=" * 80)
@@ -750,6 +921,8 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         # Step 4.3: Data Type Assignment
         print("\n[Phase 4.3] Data Type Assignment...")
         # Prepare data structures for Step 4.3
+        # Note: check_results from Step 2.13 is disabled, so initialize as empty
+        check_results = {}  # Step 2.13 is disabled, so no check constraints from Phase 2
         entity_check_constraints = {}
         for entity_name, check_result in check_results.items():
             constraints = check_result.get("check_constraints", {})
@@ -864,6 +1037,7 @@ async def test_phases_1_2_3_4_5_6_7_integration(
             result_4_6 = await step_4_6_categorical_value_extraction_batch(
                 entity_categorical_attributes,
                 entity_attributes,
+                entity_attribute_types=entity_attribute_types,
                 nl_description=nl_description,
                 domain=inferred_domain,
             )
@@ -917,11 +1091,19 @@ async def test_phases_1_2_3_4_5_6_7_integration(
             print("  No categorical values found, skipping distribution determination")
         
         print("\n[PASS] Phase 4 completed")
+        phase_4_sec = timer_elapsed_seconds(phase_4_t0)
+        log_phase_duration(logger, phase=4, seconds=phase_4_sec)
+        print(f"[Timing] Phase 4 took {phase_4_sec:.2f} seconds")
+        phase_4_sec = timer_elapsed_seconds(phase_4_t0)
+        log_phase_duration(logger, phase=4, seconds=phase_4_sec)
+        print(f"[Timing] Phase 4 took {phase_4_sec:.2f} seconds")
+        dump_phase_artifacts(logger=logger, phase=4, state=state)
         
         
         # ========================================================================
         # PHASE 5: DDL & SQL Generation
         # ========================================================================
+        phase_5_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 5: DDL & SQL Generation")
         print("=" * 80)
@@ -1068,11 +1250,19 @@ async def test_phases_1_2_3_4_5_6_7_integration(
             state["sql_queries"] = []
         
         print("\n[PASS] Phase 5 completed")
+        phase_5_sec = timer_elapsed_seconds(phase_5_t0)
+        log_phase_duration(logger, phase=5, seconds=phase_5_sec)
+        print(f"[Timing] Phase 5 took {phase_5_sec:.2f} seconds")
+        phase_5_sec = timer_elapsed_seconds(phase_5_t0)
+        log_phase_duration(logger, phase=5, seconds=phase_5_sec)
+        print(f"[Timing] Phase 5 took {phase_5_sec:.2f} seconds")
+        dump_phase_artifacts(logger=logger, phase=5, state=state)
         
         
         # ========================================================================
         # PHASE 6: Constraints & Distributions
         # ========================================================================
+        phase_6_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 6: Constraints & Distributions")
         print("=" * 80)
@@ -1172,11 +1362,19 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         print(f"  Constraints compiled: {total_compiled} total")
         
         print("\n[PASS] Phase 6 completed")
+        phase_6_sec = timer_elapsed_seconds(phase_6_t0)
+        log_phase_duration(logger, phase=6, seconds=phase_6_sec)
+        print(f"[Timing] Phase 6 took {phase_6_sec:.2f} seconds")
+        phase_6_sec = timer_elapsed_seconds(phase_6_t0)
+        log_phase_duration(logger, phase=6, seconds=phase_6_sec)
+        print(f"[Timing] Phase 6 took {phase_6_sec:.2f} seconds")
+        dump_phase_artifacts(logger=logger, phase=6, state=state)
         
         
         # ========================================================================
         # PHASE 7: Generation Strategies
         # ========================================================================
+        phase_7_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 7: Generation Strategies")
         print("=" * 80)
@@ -1364,6 +1562,13 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         print(f"  Partitioning strategies: {len(generation_ir.get('partitioning_strategies', {}))}")
         
         print("\n[PASS] Phase 7 completed")
+        phase_7_sec = timer_elapsed_seconds(phase_7_t0)
+        log_phase_duration(logger, phase=7, seconds=phase_7_sec)
+        print(f"[Timing] Phase 7 took {phase_7_sec:.2f} seconds")
+        phase_7_sec = timer_elapsed_seconds(phase_7_t0)
+        log_phase_duration(logger, phase=7, seconds=phase_7_sec)
+        print(f"[Timing] Phase 7 took {phase_7_sec:.2f} seconds")
+        dump_phase_artifacts(logger=logger, phase=7, state=state)
         
         # ========================================================================
         # SUMMARY
@@ -1397,6 +1602,8 @@ async def test_phases_1_2_3_4_5_6_7_integration(
         traceback.print_exc()
         all_passed = False
     
+    if return_state:
+        return {"success": all_passed, "state": state}
     return all_passed
 
 async def test_phases_1_to_5_integration(
@@ -1441,6 +1648,7 @@ async def test_phases_1_to_5_integration(
         # ========================================================================
         # PHASE 1: Domain & Entity Discovery
         # ========================================================================
+        phase_1_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 1: Domain & Entity Discovery")
         print("=" * 80)
@@ -1511,6 +1719,33 @@ async def test_phases_1_to_5_integration(
         consolidated_entities = [all_entities_dict[name] for name in final_entity_names if name in all_entities_dict]
         state["entities"] = consolidated_entities
         print(f"  Consolidated entities: {len(consolidated_entities)}")
+
+        # Step 1.75: Entity vs Relation Reclassification (associative-link guardrail)
+        print("\n[Phase 1.75] Entity vs Relation Reclassification...")
+        result_1_75 = await step_1_75_entity_relation_reclassification(
+            consolidated_entities, nl_description, domain=inferred_domain
+        )
+        consolidated_entities = result_1_75.get("entities", consolidated_entities)
+        state["entities"] = consolidated_entities
+        removed = result_1_75.get("removed_entity_names", [])
+        print(f"  Reclassified/removed associative entities: {len(removed)}")
+        if removed:
+            for name in removed:
+                print(f"    - {name}")
+
+        # Step 1.76: Entity vs Attribute Guardrail (deterministic)
+        print("\n[Phase 1.76] Entity vs Attribute Guardrail...")
+        result_1_76 = await step_1_76_entity_attribute_guardrail(
+            consolidated_entities, nl_description, domain=inferred_domain
+        )
+        consolidated_entities = result_1_76.get("entities", consolidated_entities)
+        state["entities"] = consolidated_entities
+        state["attribute_candidates_phase1"] = result_1_76.get("attribute_candidates", [])
+        removed_attr = result_1_76.get("removed_entity_names", [])
+        print(f"  Reclassified/removed attribute-like entities: {len(removed_attr)}")
+        if removed_attr:
+            for name in removed_attr:
+                print(f"    - {name}")
         
         # Step 1.8: Entity Cardinality
         print("\n[Phase 1.8] Entity Cardinality...")
@@ -1567,6 +1802,17 @@ async def test_phases_1_to_5_integration(
         print(f"  Relation validation: {validation_result.get('validation_passed', False)}")
         
         print("\n[PASS] Phase 1 completed")
+        phase_1_sec = timer_elapsed_seconds(phase_1_t0)
+        log_phase_duration(logger, phase=1, seconds=phase_1_sec)
+        print(f"[Timing] Phase 1 took {phase_1_sec:.2f} seconds")
+        log_json(logger, "Phase 1 state snapshot", state)
+        # Provide a lightweight ER-style snapshot early (entities + relations) so Phase 1
+        # has a concrete "ER diagram" artifact even before Phase 3's compiled ER design.
+        state["er_diagram_phase1"] = {
+            "entities": state.get("entities", []),
+            "relations": state.get("relations", []),
+        }
+        dump_phase_artifacts(logger=logger, phase=1, state=state)
 
         if max_phase and max_phase < 2:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 1.")
@@ -1575,6 +1821,7 @@ async def test_phases_1_to_5_integration(
         # ========================================================================
         # PHASE 2: Attribute Discovery & Schema Design
         # ========================================================================
+        phase_2_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 2: Attribute Discovery & Schema Design")
         print("=" * 80)
@@ -1604,6 +1851,25 @@ async def test_phases_1_to_5_integration(
         )
         synonym_results = result_2_3.get("entity_results", {})
         print(f"  Synonyms detected for {len(synonym_results)} entities")
+
+        # Apply updated attributes if provided (LLM decided; we apply deterministically)
+        updated_attrs = result_2_3.get("updated_attributes", {})
+        if isinstance(updated_attrs, dict) and updated_attrs:
+            entity_attributes = updated_attrs
+            state["attributes"] = entity_attributes
+
+        # Step 2.16: Cross-Entity Attribute Reconciliation (double precaution)
+        print("\n[Phase 2.16] Cross-Entity Attribute Reconciliation...")
+        result_2_16 = await step_2_16_cross_entity_attribute_reconciliation_batch(
+            entities=consolidated_entities,
+            attributes=entity_attributes,
+            relations=key_relations,
+            nl_description=nl_description,
+            domain=inferred_domain,
+        )
+        entity_attributes = result_2_16.get("updated_attributes", entity_attributes)
+        state["attributes"] = entity_attributes
+        print(f"  Cross-entity reconciliation processed for {len((result_2_16.get('entity_results') or {}))} entities")
         
         # Step 2.4: Composite Attribute Handling
         print("\n[Phase 2.4] Composite Attribute Handling...")
@@ -1649,6 +1915,27 @@ async def test_phases_1_to_5_integration(
         }
         state["primary_keys"] = entity_primary_keys
         print(f"  Primary keys identified for {len(entity_primary_keys)} entities")
+
+        # If Step 2.7 chose a surrogate key not present in the attribute list, propagate it into attributes now.
+        for ent_name, pk_list in (entity_primary_keys or {}).items():
+            if not isinstance(pk_list, list):
+                continue
+            for pk_attr in pk_list:
+                if not isinstance(pk_attr, str) or not pk_attr.strip():
+                    continue
+                if pk_attr not in (entity_attr_lists.get(ent_name) or []):
+                    entity_attr_lists.setdefault(ent_name, []).append(pk_attr)
+                attrs_obj_list = entity_attributes.get(ent_name) or []
+                existing_names = {
+                    (a.get("name") if isinstance(a, dict) else getattr(a, "name", ""))
+                    for a in attrs_obj_list
+                }
+                if pk_attr not in existing_names:
+                    attrs_obj_list.append(
+                        {"name": pk_attr, "description": "Surrogate primary key (auto-added)", "type_hint": "integer"}
+                    )
+                    entity_attributes[ent_name] = attrs_obj_list
+        state["attributes"] = entity_attributes
         
         # Step 2.8: Multivalued/Derived Detection
         print("\n[Phase 2.8] Multivalued/Derived Detection...")
@@ -1701,97 +1988,41 @@ async def test_phases_1_to_5_integration(
         default_results = result_2_12.get("entity_results", {})
         print(f"  Default values identified for {len(default_results)} entities")
         
-        # Step 2.13: Check Constraints
-        print("\n[Phase 2.13] Check Constraints...")
-        result_2_13 = await step_2_13_check_constraints_batch(
-            consolidated_entities, entity_attr_lists, nl_description, domain=inferred_domain
+        # Step 2.13: Check Constraints (disabled for now; requires finalized relational schema)
+        # Step 2.14: Entity Cleanup (LLM-driven; no Python deletions)
+        print("\n[Phase 2.14] Entity Cleanup (relation-connecting attribute cleanup)...")
+        result_2_14 = await step_2_14_entity_cleanup_batch(
+            entities=consolidated_entities,
+            entity_attributes=entity_attributes,
+            primary_keys=entity_primary_keys,
+            relations=key_relations,
+            nl_description=nl_description,
+            domain=inferred_domain,
         )
-        check_results = result_2_13.get("entity_results", {})
-        print(f"  Check constraints identified for {len(check_results)} entities")
-        
-        # Step 2.14: Relation Realization
-        print("\n[Phase 2.14] Relation Realization...")
-        result_2_14 = await step_2_14_relation_realization_batch(
-            key_relations, consolidated_entities, entity_primary_keys, entity_attr_lists,
-            relation_cardinalities=relation_results_1_11,  # Pass cardinalities from Step 1.11
-            nl_description=nl_description, domain=inferred_domain
-        )
-        fk_results = result_2_14.get("relation_results", {})
-        
-        # CRITICAL: Add FK attributes to entity attribute lists when needs_creation=True
-        # Convert entity_attr_lists to the format expected by add_foreign_key_attributes_to_entities
-        entity_attributes_dict = {}
-        for entity_name, attr_list in entity_attr_lists.items():
-            # Convert list of attribute names to list of attribute dicts
-            entity_attributes_dict[entity_name] = [
-                {"name": attr_name} if isinstance(attr_name, str) else attr_name
-                for attr_name in attr_list
-            ]
-        
-        # Add FK attributes to entities
-        entity_attributes_dict = add_foreign_key_attributes_to_entities(
-            fk_results, entity_attributes_dict, key_relations
-        )
-        
-        # CRITICAL: Remove redundant relationship attributes (e.g., "sensor_type" string when "sensor_type_id" FK exists)
-        # This uses both LLM-identified redundant attributes (from Step 2.14) and deterministic pattern matching
-        entity_attributes_dict = remove_redundant_relationship_attributes(
-            entity_attributes_dict, fk_results, key_relations
-        )
-        
-        # Update entity_attr_lists with the new FK attributes (after removal of redundant ones)
-        for entity_name, attr_list in entity_attributes_dict.items():
-            entity_attr_lists[entity_name] = [
-                attr.get("name") if isinstance(attr, dict) else getattr(attr, "name", "")
-                for attr in attr_list
-            ]
-        
-        # Build foreign_keys list for downstream steps
+        cleaned_attrs = result_2_14.get("updated_attributes", {}) or {}
+        if isinstance(cleaned_attrs, dict) and cleaned_attrs:
+            entity_attributes = cleaned_attrs
+            state["attributes"] = entity_attributes
+
+        # Rebuild name-only lists for downstream steps
+        entity_attr_lists = {
+            name: [attr.get("name") if isinstance(attr, dict) else getattr(attr, "name", "") for attr in attrs]
+            for name, attrs in entity_attributes.items()
+        }
+
+        # Foreign keys are constructed later during relational schema compilation
         foreign_keys = []
-        for rel_id, rel_result in fk_results.items():
-            # rel_result is the direct output from Step 2.14, not nested
-            if rel_result.get("realization_type") == "foreign_key":
-                fk_attrs = rel_result.get("realization_attrs", {})
-                # Find which entity this relation belongs to
-                rel_entities = []
-                for relation in key_relations:
-                    relation_entities = relation.get("entities", [])
-                    relation_id = f"{'+'.join(sorted(relation_entities))}"
-                    if relation_id == rel_id:
-                        rel_entities = relation_entities
-                        break
-                
-                if rel_entities:
-                    # Determine which entity gets the FK (the one that's not the referenced entity)
-                    for fk_attr, ref in fk_attrs.items():
-                        # Parse reference (e.g., "SensorType.sensor_type_id")
-                        if "." in ref:
-                            ref_table, ref_attr = ref.split(".", 1)
-                            # Find target entity (the one that's not the referenced entity)
-                            target_entity = None
-                            for entity_name in rel_entities:
-                                if entity_name != ref_table:
-                                    target_entity = entity_name
-                                    break
-                            
-                            if target_entity:
-                                foreign_keys.append({
-                                    "from_entity": target_entity,
-                                    "to_entity": ref_table,
-                                    "attributes": [fk_attr],
-                                    "referenced_attributes": [ref_attr],
-                                    "referential_integrity": rel_result.get("referential_integrity", {}).get(fk_attr),
-                                })
-        
         state["foreign_keys"] = foreign_keys
-        state["entity_attributes"] = entity_attributes_dict  # Store full attribute dicts, not just names
-        print(f"  Relations realized: {len(fk_results)} relations processed, {len(foreign_keys)} foreign keys created")
+        state["entity_attributes"] = entity_attributes
+        print(f"  Entity cleanup completed for {len(cleaned_attrs)} entities; foreign keys deferred")
         
         print("\n[PASS] Phase 2 completed")
+        dump_phase_artifacts(logger=logger, phase=2, state=state)
         
         # ========================================================================
         # PHASE 3: Query Requirements & Schema Refinement
         # ========================================================================
+        phase_3_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 3: Query Requirements & Schema Refinement")
         print("=" * 80)
@@ -1812,10 +2043,12 @@ async def test_phases_1_to_5_integration(
         
         # Step 3.2: Information Completeness Check
         print("\n[Phase 3.2] Information Completeness Check...")
+        phase3_cfg = get_phase3_config()
         result_3_2 = await step_3_2_information_completeness_batch(
             information_needs, consolidated_entities, key_relations, entity_attributes,
             entity_primary_keys, foreign_keys, nl_description=nl_description, domain=inferred_domain,
-            max_iterations=3, max_time_sec=180
+            max_iterations=phase3_cfg.step_3_2_max_iterations,
+            max_time_sec=phase3_cfg.step_3_2_max_time_sec,
         )
         completeness_results = result_3_2.get("completeness_results", {})
         print(f"  Completeness checked for {len(completeness_results)} information needs")
@@ -1909,10 +2142,26 @@ async def test_phases_1_to_5_integration(
         state["er_design"] = er_design
         print(f"  ER design compiled: {len(er_design.get('entities', []))} entities, {len(er_design.get('relations', []))} relations")
         
+        # Step 3.45: Junction Table Naming
+        print("\n[Phase 3.45] Junction Table Naming...")
+        junction_table_names = await step_3_45_junction_table_naming(
+            relations=er_design.get("relations", []),
+            entities=er_design.get("entities", []),
+            nl_description=nl_description,
+            domain=state.get("domain"),
+        )
+        state["junction_table_names"] = junction_table_names
+        if junction_table_names:
+            print(f"  Named {len(junction_table_names)} junction tables")
+            for rel_key, name in list(junction_table_names.items())[:3]:
+                print(f"    - {rel_key} -> {name}")
+        else:
+            print("  No junction tables needed")
+        
         # Step 3.5: Relational Schema Compilation
         print("\n[Phase 3.5] Relational Schema Compilation...")
         relational_schema = step_3_5_relational_schema_compilation(
-            er_design, foreign_keys, entity_primary_keys
+            er_design, foreign_keys, entity_primary_keys, constraints=state.get("constraints"), junction_table_names=junction_table_names
         )
         state["relational_schema"] = relational_schema
         tables = relational_schema.get("tables", [])
@@ -1921,6 +2170,7 @@ async def test_phases_1_to_5_integration(
             print(f"    - {table.get('name', '')}: {len(table.get('columns', []))} columns")
         
         print("\n[PASS] Phase 3 completed")
+        dump_phase_artifacts(logger=logger, phase=3, state=state)
         
         if max_phase and max_phase < 4:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 3.")
@@ -1929,6 +2179,7 @@ async def test_phases_1_to_5_integration(
         # ========================================================================
         # PHASE 4: Functional Dependencies & Data Types
         # ========================================================================
+        phase_4_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 4: Functional Dependencies & Data Types")
         print("=" * 80)
@@ -2003,6 +2254,8 @@ async def test_phases_1_to_5_integration(
         # Step 4.3: Data Type Assignment
         print("\n[Phase 4.3] Data Type Assignment...")
         # Prepare data structures for Step 4.3
+        # Note: check_results from Step 2.13 is disabled, so initialize as empty
+        check_results = {}  # Step 2.13 is disabled, so no check constraints from Phase 2
         entity_check_constraints = {}
         for entity_name, check_result in check_results.items():
             constraints = check_result.get("check_constraints", {})
@@ -2117,6 +2370,7 @@ async def test_phases_1_to_5_integration(
             result_4_6 = await step_4_6_categorical_value_extraction_batch(
                 entity_categorical_attributes,
                 entity_attributes,
+                entity_attribute_types=entity_attribute_types,
                 nl_description=nl_description,
                 domain=inferred_domain,
             )
@@ -2170,6 +2424,7 @@ async def test_phases_1_to_5_integration(
             print("  No categorical values found, skipping distribution determination")
         
         print("\n[PASS] Phase 4 completed")
+        dump_phase_artifacts(logger=logger, phase=4, state=state)
         
         if max_phase and max_phase < 5:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 4.")
@@ -2178,6 +2433,7 @@ async def test_phases_1_to_5_integration(
         # ========================================================================
         # PHASE 5: DDL & SQL Generation
         # ========================================================================
+        phase_5_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 5: DDL & SQL Generation")
         print("=" * 80)
@@ -2331,6 +2587,7 @@ async def test_phases_1_to_5_integration(
             state["sql_queries"] = []
         
         print("\n[PASS] Phase 5 completed")
+        dump_phase_artifacts(logger=logger, phase=5, state=state)
         
         if max_phase and max_phase < 6:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 5.")
@@ -2339,6 +2596,7 @@ async def test_phases_1_to_5_integration(
         # ========================================================================
         # PHASE 6: Constraints & Distributions
         # ========================================================================
+        phase_6_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 6: Constraints & Distributions")
         print("=" * 80)
@@ -2438,6 +2696,7 @@ async def test_phases_1_to_5_integration(
         print(f"  Constraints compiled: {total_compiled} total")
         
         print("\n[PASS] Phase 6 completed")
+        dump_phase_artifacts(logger=logger, phase=6, state=state)
         
         if max_phase and max_phase < 7:
             print(f"\n[STOP] Reached max_phase={max_phase}. Stopping after Phase 6.")
@@ -2446,6 +2705,7 @@ async def test_phases_1_to_5_integration(
         # ========================================================================
         # PHASE 7: Generation Strategies
         # ========================================================================
+        phase_7_t0 = timer_start()
         print("\n" + "=" * 80)
         print("PHASE 7: Generation Strategies")
         print("=" * 80)
@@ -2644,6 +2904,7 @@ async def test_phases_1_to_5_integration(
         print(f"  Partitioning strategies: {len(generation_ir.get('partitioning_strategies', {}))}")
         
         print("\n[PASS] Phase 7 completed")
+        dump_phase_artifacts(logger=logger, phase=7, state=state)
         
         # ========================================================================
         # SUMMARY
@@ -2682,7 +2943,8 @@ async def test_phases_1_to_5_integration(
 
 def process_all_descriptions_sequential(
     descriptions_file: str,
-    phases: str = "1-7"
+    phases: str = "1-7",
+    max_phase: int = None
 ):
     """Process all NL descriptions from a file sequentially."""
     print("=" * 80)
@@ -2697,6 +2959,9 @@ def process_all_descriptions_sequential(
     if total == 0:
         print("No descriptions found in file!")
         return False
+    
+    if max_phase:
+        print(f"Running up to Phase {max_phase}")
     
     print("Processing sequentially (one at a time)")
     print("=" * 80)
@@ -2717,7 +2982,7 @@ def process_all_descriptions_sequential(
             if phases == "1-5":
                 success = asyncio.run(test_phases_1_to_5_integration(description, idx))
             else:
-                success = asyncio.run(test_phases_1_2_3_4_5_6_7_integration(description, idx))
+                success = asyncio.run(test_phases_1_2_3_4_5_6_7_integration(description, idx, max_phase=max_phase))
             
             results.append((idx, success, ""))
             print(f"\n[Description {idx}] {'SUCCESS' if success else 'FAILED'}")
@@ -2771,6 +3036,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Process only a single description (for testing)"
     )
+    parser.add_argument(
+        "--max-phase",
+        type=int,
+        default=None,
+        help="Maximum phase to run (1-7). If specified, stops after this phase."
+    )
     args = parser.parse_args()
     
     # Determine descriptions file path
@@ -2785,12 +3056,13 @@ if __name__ == "__main__":
         if args.phases == "1-5":
             success = asyncio.run(test_phases_1_to_5_integration())
         else:
-            success = asyncio.run(test_phases_1_2_3_4_5_6_7_integration())
+            success = asyncio.run(test_phases_1_2_3_4_5_6_7_integration(max_phase=args.max_phase))
     else:
         # Sequential mode
         success = process_all_descriptions_sequential(
             str(descriptions_file),
-            args.phases
+            args.phases,
+            max_phase=args.max_phase
         )
     
     sys.exit(0 if success else 1)
