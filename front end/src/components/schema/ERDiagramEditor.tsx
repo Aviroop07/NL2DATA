@@ -26,48 +26,7 @@ const ERDiagramEditor: React.FC = () => {
   };
   
   return (
-    <Box sx={{ p: 4 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Typography variant="h5" sx={{ fontWeight: 600, mb: 0.5 }}>
-            ER Diagram
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Visual representation of your database entities and relationships
-          </Typography>
-        </Box>
-        <Box>
-          {!erEditing && (
-            <Button 
-              variant="contained" 
-              onClick={handleEdit}
-              sx={{ minWidth: 100 }}
-            >
-              Edit
-            </Button>
-          )}
-          {erEditing && (
-            <>
-              <Button 
-                variant="contained" 
-                onClick={handleSave} 
-                sx={{ mr: 1, minWidth: 120 }} 
-                disabled={!hasUnsavedERChanges}
-              >
-                Save Changes
-              </Button>
-              <Button 
-                variant="outlined" 
-                onClick={handleDiscard}
-                sx={{ minWidth: 120 }}
-              >
-                Discard
-              </Button>
-            </>
-          )}
-        </Box>
-      </Box>
-      
+    <Box>
       {erDiagram?.imageUrl ? (
         <Paper 
           elevation={0}
@@ -91,6 +50,8 @@ const ERDiagramEditor: React.FC = () => {
             }}
           />
         </Paper>
+      ) : erDiagram && (erDiagram.entities?.length > 0 || erDiagram.relations?.length > 0) ? (
+        <ERDiagramForm />
       ) : (
         <Paper 
           elevation={0}
@@ -107,21 +68,6 @@ const ERDiagramEditor: React.FC = () => {
           <Typography variant="body2" color="text.secondary">
             ER Diagram will appear here after processing
           </Typography>
-        </Paper>
-      )}
-      
-      {erEditing && (
-        <Paper 
-          elevation={0}
-          sx={{ 
-            p: 3,
-            border: '1px solid',
-            borderColor: 'primary.main',
-            borderRadius: 2,
-            bgcolor: 'action.hover'
-          }}
-        >
-          <ERDiagramForm />
         </Paper>
       )}
     </Box>

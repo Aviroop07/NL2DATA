@@ -1,4 +1,4 @@
-from NL2DATA.phases.phase2.step_2_8_multivalued_derived_detection import (
+from NL2DATA.phases.phase7.step_7_1_multivalued_derived_detection import (
     MultivaluedDerivedOutput,
     _clean_2_8_result,
     _validate_2_8_output,

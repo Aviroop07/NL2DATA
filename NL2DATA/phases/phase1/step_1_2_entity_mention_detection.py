@@ -3,7 +3,7 @@
 Checks if entities are explicitly named in the natural language description.
 """
 
-from typing import Dict, Any, List, Iterable, Tuple
+from typing import List, Iterable, Tuple
 import re
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -12,6 +12,7 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.utils.tools.validation_tools import _verify_evidence_substring_impl
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -148,7 +149,7 @@ def _extract_explicit_entities_deterministic(nl_description: str) -> List[Entity
 
 
 @traceable_step("1.2", phase=1, tags=["entity_mention_detection"])
-async def step_1_2_entity_mention_detection(nl_description: str) -> Dict[str, Any]:
+async def step_1_2_entity_mention_detection(nl_description: str) -> EntityMentionOutput:
     """
     Step 1.2: Check if entities are explicitly named in the description.
     
@@ -178,6 +179,16 @@ async def step_1_2_entity_mention_detection(nl_description: str) -> Dict[str, An
     except Exception as e:
         logger.warning(f"Deterministic explicit entity extraction failed: {e}")
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=EntityMentionOutput,
+        additional_requirements=[
+            "Grounding rule (critical): For every item, evidence MUST be copied verbatim from the input (exact substring; preserve casing/spaces)",
+            "Reasoning must be <= 25 words",
+            "name must be a canonical form derived ONLY from evidence (allowed transforms: trim whitespace, remove surrounding quotes, convert spaces to underscores). Do not add words."
+        ]
+    )
+    
     system_prompt = """You are a database design assistant.
 
 Task
@@ -188,17 +199,7 @@ An entity is explicit only if it appears as a verbatim noun/noun-phrase in the i
 Do NOT infer entities that are not explicitly stated.
 Do NOT treat attributes/metrics as entities (e.g., temperature, vibration, timestamps, percentages, row counts).
 
-Output format (strict)
-Return ONLY a single JSON object with EXACTLY these keys:
-{
-  "has_explicit_entities": boolean,
-  "mentioned_entities": [{"name": string, "evidence": string}],
-  "reasoning": string
-}
-
-Grounding rule (critical)
-- For every item, evidence MUST be copied verbatim from the input (exact substring; preserve casing/spaces).
-- name must be a canonical form derived ONLY from evidence (allowed transforms: trim whitespace, remove surrounding quotes, convert spaces to underscores). Do not add words.
+""" + output_structure_section + """
 
 Selection rules
 - Include each unique entity once (deduplicate by evidence case-insensitively).
@@ -319,8 +320,7 @@ No extra text. No markdown. No code fences."""
         if result.mentioned_entities:
             logger.info(f"Found {len(result.mentioned_entities)} explicitly mentioned entities: {result.mentioned_entities}")
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error in entity mention detection: {e}", exc_info=True)

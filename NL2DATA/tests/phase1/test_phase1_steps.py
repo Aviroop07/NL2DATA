@@ -1,4 +1,7 @@
-"""Test script for Phase 1 steps (1.2, 1.3, 1.4)."""
+"""Test script for Phase 1 steps (1.1, 1.2, 1.4).
+
+Note: Step 1.3 (domain inference) was merged into Step 1.1 per the new pipeline plan.
+"""
 
 import asyncio
 import sys
@@ -9,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from NL2DATA.phases.phase1 import (
+    step_1_1_domain_detection,
     step_1_2_entity_mention_detection,
-    step_1_3_domain_inference,
     step_1_4_key_entity_extraction,
 )
 from NL2DATA.utils.logging import setup_logging, get_logger
@@ -18,7 +21,7 @@ from NL2DATA.config import get_config
 
 
 async def test_phase1_steps():
-    """Test Phase 1 steps 1.2, 1.3, and 1.4."""
+    """Test Phase 1 steps 1.1, 1.2, and 1.4."""
     logger = get_logger(__name__)
     
     # Setup logging
@@ -74,20 +77,21 @@ async def test_phase1_steps():
             all_passed = False
             continue
         
-        # Step 1.3: Domain Inference
+        # Step 1.1: Domain Detection & Inference (merged)
         print("\n" + "-" * 60)
-        print("Step 1.3: Domain Inference")
+        print("Step 1.1: Domain Detection & Inference")
         print("-" * 60)
         try:
-            result_1_3 = await step_1_3_domain_inference(test_description)
-            print(f"[PASS] Step 1.3 completed")
-            print(f"  - Inferred domain: {result_1_3['domain']}")
-            print(f"  - Confidence: {result_1_3['confidence']:.2f}")
-            if result_1_3.get('reasoning'):
-                print(f"  - Reasoning: {result_1_3['reasoning']}")
+            result_1_1 = await step_1_1_domain_detection(test_description)
+            print("[PASS] Step 1.1 completed")
+            print(f"  - Domain: {result_1_1.get('domain', '')}")
+            print(f"  - Has explicit domain: {result_1_1.get('has_explicit_domain', False)}")
+            print(f"  - Confidence: {result_1_1.get('confidence', 0.0):.2f}")
+            if result_1_1.get("reasoning"):
+                print(f"  - Reasoning: {result_1_1['reasoning']}")
         except Exception as e:
-            print(f"[ERROR] Step 1.3 failed: {e}")
-            logger.error(f"Step 1.3 failed for {test_name}", exc_info=True)
+            print(f"[ERROR] Step 1.1 failed: {e}")
+            logger.error(f"Step 1.1 failed for {test_name}", exc_info=True)
             all_passed = False
             continue
         
@@ -98,7 +102,7 @@ async def test_phase1_steps():
         try:
             result_1_4 = await step_1_4_key_entity_extraction(
                 test_description,
-                domain=result_1_3.get('domain'),
+                domain=result_1_1.get("domain"),
                 mentioned_entities=result_1_2.get('mentioned_entities', [])
             )
             print(f"[PASS] Step 1.4 completed")
@@ -118,7 +122,7 @@ async def test_phase1_steps():
     
     print("=" * 60)
     if all_passed:
-        print("[PASS] All Phase 1 steps (1.2, 1.3, 1.4) completed successfully for all test cases!")
+        print("[PASS] All Phase 1 steps (1.1, 1.2, 1.4) completed successfully for all test cases!")
     else:
         print("[FAIL] Some test cases failed. Check errors above.")
     print("=" * 60)

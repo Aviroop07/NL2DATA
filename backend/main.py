@@ -5,10 +5,12 @@ import sys
 import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from pathlib import Path
 
 from backend.config import settings
-from backend.api.routes import processing, suggestions, schema
+from backend.api.routes import processing, suggestions, schema, checkpoints
 from backend.api.websocket import websocket_endpoint
 
 # Configure logging - force output to stdout with no buffering
@@ -159,6 +161,12 @@ app.add_middleware(
 app.include_router(processing.router)
 app.include_router(suggestions.router)
 app.include_router(schema.router)
+app.include_router(checkpoints.router)
+
+# Static files for ER diagram images
+static_dir = Path(__file__).parent / "static"
+static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # WebSocket
 app.websocket("/ws/connect/{job_id}")(websocket_endpoint)

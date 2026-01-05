@@ -9,11 +9,9 @@ from backend.models.requests import ProcessStartRequest
 from backend.models.responses import ProcessStartResponse, ProcessStatusResponse
 from backend.dependencies import (
     get_job_manager,
-    get_websocket_manager,
     get_nl2data_service
 )
 from backend.utils.job_manager import JobManager
-from backend.utils.websocket_manager import WebSocketManager
 from backend.services.nl2data_service import NL2DataService
 
 logger = logging.getLogger(__name__)
@@ -25,13 +23,12 @@ async def start_processing(
     request: ProcessStartRequest,
     background_tasks: BackgroundTasks,
     job_manager: JobManager = Depends(get_job_manager),
-    ws_manager: WebSocketManager = Depends(get_websocket_manager),
     nl2data_service: NL2DataService = Depends(get_nl2data_service)
 ):
     """
-    Start NL2DATA processing pipeline.
+    Start NL2DATA processing pipeline with checkpoint-based workflow.
     
-    Creates a new job, starts pipeline in background, returns job_id immediately.
+    Creates a new job, executes to first checkpoint (domain) in background, returns job_id immediately.
     """
     import time
     start_time = time.time()
@@ -56,14 +53,15 @@ async def start_processing(
     )
     logger.info(f"Job {job_id} registered with status: pending")
     
-    # Start processing in background
-    logger.info("Adding background task for pipeline processing...")
+    # Start processing to first checkpoint (domain) in background
+    logger.info("Adding background task to execute to domain checkpoint...")
     background_tasks.add_task(
-        nl2data_service.process_with_events,
+        nl2data_service.execute_to_checkpoint,
         job_id=job_id,
         nl_description=request.nl_description,
-        ws_manager=ws_manager,
-        job_manager=job_manager
+        checkpoint_type="domain",
+        job_manager=job_manager,
+        current_state=None
     )
     logger.info(f"Background task added for job {job_id}")
     

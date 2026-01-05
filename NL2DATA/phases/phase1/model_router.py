@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 PHASE1_STEP_MAPPING: dict[str, TaskType] = {
     "1.1": "simple",              # Domain Detection - simple
     "1.2": "simple",              # Entity Mention Detection - simple
-    "1.3": "important",           # Domain Inference - important
+    # "1.3": Removed - merged into step 1.1 (Domain Detection & Inference)
     "1.4": "critical_reasoning",   # Key Entity Extraction - CRITICAL foundation step, use o3-pro
     "1.5": "simple",              # Relation Mention Detection - simple
     "1.6": "important",           # Auxiliary Entity Suggestion - important

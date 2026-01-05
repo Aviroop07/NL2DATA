@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # Use OS temp dir by default (works on Windows/Linux/macOS).
     csv_storage_path: str = str(Path(tempfile.gettempdir()) / "nl2data_csv")
     csv_cleanup_after_hours: int = 24
+    
+    # ER diagram storage
+    # Store ER diagram images in backend/static/er_diagrams/
+    # Note: The generate_and_save_er_diagram function will create the er_diagrams subdirectory
+    er_diagram_storage_path: str = str(Path(__file__).parent / "static")
 
 
 settings = Settings()

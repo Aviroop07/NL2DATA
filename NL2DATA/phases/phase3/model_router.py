@@ -1,72 +1,23 @@
-"""Phase 3 model router for step-specific model selection.
+"""Model router for Phase 3 (ER Design Compilation) and Phase 4 (Relational Schema Compilation)."""
 
-This module provides model selection for Phase 3 steps, mapping each step
-to the appropriate task type and model.
-"""
+from NL2DATA.utils.llm.base_router import get_model_for_task
 
-from typing import Optional
-from langchain_openai import ChatOpenAI
-
-from NL2DATA.utils.llm.base_router import get_model_for_task, TaskType
-from NL2DATA.utils.logging import get_logger
-
-logger = get_logger(__name__)
-
-# Phase 3 step to task type mapping
-PHASE3_STEP_MAPPING: dict[str, TaskType] = {
-    "3.1": "advanced_reasoning",  # Information Need Identification - advanced reasoning, use o3
-    "3.2": "advanced_reasoning",   # Information Completeness Check - advanced reasoning, use o3
-    "3.3": "high_fanout",          # Phase 2 Steps with Enhanced Context - per-entity/per-attribute
-    "3.45": "important",           # Junction Table Naming - important for schema quality
-    # 3.4 and 3.5 are deterministic (no LLM)
+# Phase 3 and 4 step mappings
+STEP_TO_TASK_TYPE = {
+    "3.1": "simple",      # ER Design Compilation (deterministic)
+    "3.2": "important",   # Junction Table Naming (important for schema quality)
+    "4.1": "simple",      # Relational Schema Compilation (deterministic)
 }
 
 
-def get_model_for_step(
-    step_id: str,
-    model_name: Optional[str] = None,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-    timeout: Optional[int] = None,
-) -> ChatOpenAI:
-    """
-    Get appropriate model for a Phase 3 step based on step ID.
-    
-    Maps Phase 3 step IDs to task types based on step characteristics.
+def get_model_for_step(step_number: str):
+    """Get LLM model for a Phase 3 or 4 step.
     
     Args:
-        step_id: Phase 3 step identifier (e.g., "3.1", "3.2", "3.3")
-        model_name: Override model name (optional)
-        temperature: Override temperature (optional)
-        max_tokens: Override max tokens (optional)
-        timeout: Override timeout (optional)
+        step_number: Step number (e.g., "3.1", "3.2", "4.1")
         
     Returns:
-        ChatOpenAI: Configured model for the step
-        
-    Example:
-        >>> # For information need identification (important task)
-        >>> model = get_model_for_step("3.1")
-        >>> # Uses gpt-4o
+        LLM model instance
     """
-    # Validate step ID is Phase 3
-    if not step_id.startswith("3."):
-        logger.warning(
-            f"Step ID '{step_id}' does not appear to be a Phase 3 step. "
-            f"Using default 'simple' task type."
-        )
-        task_type = "simple"
-    else:
-        # Get task type from mapping
-        task_type = PHASE3_STEP_MAPPING.get(step_id, "simple")
-        logger.debug(f"Mapped Phase 3 step '{step_id}' to task type '{task_type}'")
-    
-    return get_model_for_task(
-        task_type=task_type,
-        model_name=model_name,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-
-
+    task_type = STEP_TO_TASK_TYPE.get(step_number, "simple")
+    return get_model_for_task(task_type=task_type)

@@ -2,13 +2,13 @@
 
 from typing import Dict, Any
 try:
-    from NL2DATA.phases.phase3.step_3_5_relational_schema_compilation import (
-        step_3_5_relational_schema_compilation
+    from NL2DATA.phases.phase3.step_4_3_relational_schema_compilation import (
+        step_4_3_relational_schema_compilation
     )
     from NL2DATA.ir.models.er_relational import ERDesign, RelationalSchema
 except ImportError:
     # Fallback if NL2DATA not available
-    step_3_5_relational_schema_compilation = None
+    step_4_3_relational_schema_compilation = None
     ERDesign = None
     RelationalSchema = None
 
@@ -30,9 +30,9 @@ class ConversionService:
             updated_state = self._apply_er_changes(updated_state, changes)
             
             # Convert ER → Relational
-            if step_3_5_relational_schema_compilation and ERDesign:
+            if step_4_3_relational_schema_compilation and ERDesign:
                 er_design = ERDesign(**updated_state.get("er_design", {}))
-                relational_schema = await step_3_5_relational_schema_compilation(er_design)
+                relational_schema = await step_4_3_relational_schema_compilation(er_design)
                 updated_state["relational_schema"] = relational_schema.dict() if hasattr(relational_schema, 'dict') else relational_schema
             
         elif edit_mode == "relational_schema":

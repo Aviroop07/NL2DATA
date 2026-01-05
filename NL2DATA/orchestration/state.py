@@ -29,8 +29,12 @@ class IRGenerationState(TypedDict, total=False):
     # Phase 1: Domain & Entity Discovery
     domain: Optional[str]  # Detected or inferred domain
     has_explicit_domain: Optional[bool]  # Whether domain was explicitly mentioned
-    entities: Annotated[List[Dict[str, Any]], add]  # Accumulated entities
-    relations: Annotated[List[Dict[str, Any]], add]  # Accumulated relations
+    # IMPORTANT:
+    # Entities/relations should represent the *current canonical* view, not an ever-growing history.
+    # Using an additive reducer here causes duplicate names to accumulate across steps/loops,
+    # which then fails phase gates (e.g., duplicate entity names).
+    entities: List[Dict[str, Any]]
+    relations: List[Dict[str, Any]]
     entity_cardinalities: Dict[str, Dict[str, str]]  # entity -> cardinality info
     relation_cardinalities: Dict[str, Dict[str, Any]]  # relation_id -> cardinality info
     

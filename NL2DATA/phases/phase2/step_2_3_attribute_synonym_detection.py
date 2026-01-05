@@ -13,6 +13,7 @@ from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.utils.pipeline_config import get_phase2_config
 from NL2DATA.utils.similarity import propose_attribute_synonym_candidates
 
@@ -146,9 +147,9 @@ class AttributeSynonymOutput(BaseModel):
 @traceable_step("2.3", phase=2, tags=['phase_2_step_3'])
 async def step_2_3_attribute_synonym_detection(
     entity_name: str,
-    attributes: List[Dict[str, Any]],
+    attributes: List,
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> AttributeSynonymOutput:
     """
     Step 2.3 (per-entity): Check for duplicate or synonymous attributes.
     
@@ -174,11 +175,11 @@ async def step_2_3_attribute_synonym_detection(
     
     if not attributes:
         logger.warning(f"No attributes provided for entity {entity_name}")
-        return {
-            "synonyms": [],
-            "merged_attributes": [],
-            "final_attribute_list": []
-        }
+        return AttributeSynonymOutput(
+            synonyms=[],
+            merged_attributes=[],
+            final_attribute_list=[]
+        )
     
     # Build attribute list for prompt
     attribute_list_str = ""
@@ -189,6 +190,15 @@ async def step_2_3_attribute_synonym_detection(
         if attr_desc:
             attribute_list_str += f": {attr_desc}"
         attribute_list_str += "\n"
+    
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=AttributeSynonymOutput,
+        additional_requirements=[
+            "If should_merge=true, preferred_name MUST be either attr1 or attr2 (do not invent new names)",
+            "The \"reasoning\" field is REQUIRED and cannot be omitted or empty"
+        ]
+    )
     
     # System prompt
     system_prompt = """You are a database design assistant. Your task is to identify duplicate attributes, synonyms, or attributes that should be merged to prevent schema bloat and confusion.
@@ -201,27 +211,17 @@ Look for:
    - Examples: "address" and "mailing_address", "created" and "created_at"
 4. **Attributes that should be merged**: Attributes that are better represented as a single attribute
 
-For each potential duplicate or merge candidate, provide:
-- attr1: Name of first attribute
-- attr2: Name of second attribute
-- should_merge: Whether these should be merged (true) or kept separate (false)
-- preferred_name: The canonical name to use if merging (usually the more standard/clear name)
-- reasoning: REQUIRED - Clear explanation of why merge or keep separate (cannot be omitted)
+""" + output_structure_section + """
 
-After identifying duplicates, provide:
-- merged_attributes: List of attribute names that should be removed (the non-preferred names)
-- final_attribute_list: Complete list of unique attribute names after consolidation (preferred names only)
+CRITICAL CONSTRAINT: You MUST ONLY reference attribute names that appear in the provided "Attributes to check" list
+Do NOT invent new attribute names (e.g., do not create "email_address" if it is not in the list)
 
 Important:
 - If two attributes are synonyms, merge them and keep the more standard/canonical name
 - If attributes are related but distinct, keep them separate
 - Consider domain context when making decisions
 - Be conservative: only merge if truly necessary
-- Prefer shorter, clearer names when merging
-
-CRITICAL CONSTRAINT:
-- You MUST ONLY reference attribute names that appear in the provided "Attributes to check" list.
-- Do NOT invent new attribute names (e.g., do not create "email_address" if it is not in the list)."""
+- Prefer shorter, clearer names when merging"""
     
     # Human prompt template
     human_prompt = f"""Entity: {entity_name}
@@ -295,13 +295,11 @@ Original description (if available):
     else:
         # If similarity is enabled but we found no suspicious pairs, do a deterministic no-op.
         if cfg.step_2_3_similarity_enabled:
-            return {
-                "synonyms": [],
-                "merged_attributes": [],
-                "final_attribute_list": [a.get("name") if isinstance(a, dict) else getattr(a, "name", "") for a in attributes],
-                "updated_attributes": [a if isinstance(a, dict) else {"name": getattr(a, "name", "")} for a in attributes],
-                "candidate_pairs": [],
-            }
+            return AttributeSynonymOutput(
+                synonyms=[],
+                merged_attributes=[],
+                final_attribute_list=[a.get("name") if isinstance(a, dict) else getattr(a, "name", "") for a in attributes],
+            )
 
     # Initialize model and create chain
     llm = get_model_for_step("2.3")  # Step 2.3 maps to "high_fanout" task type
@@ -384,14 +382,12 @@ Return a corrected JSON output (same schema)."""
                 f"Entity {entity_name}: Step 2.3 output still invalid after retries; "
                 f"falling back to no-op merge (keep original attribute list)."
             )
-            # No-op fallback (LLM output discarded)
-            fallback = {
-                "synonyms": [],
-                "merged_attributes": [],
-                "final_attribute_list": [a.get("name") if isinstance(a, dict) else getattr(a, "name", "") for a in attributes],
-                "updated_attributes": attributes,
-            }
-            return fallback
+            # No-op fallback (LLM output discarded) - return Pydantic model, not dict
+            return AttributeSynonymOutput(
+                synonyms=[],
+                merged_attributes=[],
+                final_attribute_list=[a.get("name") if isinstance(a, dict) else getattr(a, "name", "") for a in attributes],
+            )
         
         # Work with Pydantic model directly
         synonym_count = len(result.synonyms)
@@ -403,30 +399,43 @@ Return a corrected JSON output (same schema)."""
             f"{final_count} final attributes"
         )
         
-        # Apply LLM-decided final list to produce updated attribute dict list
-        if result.final_attribute_list:
-            updated_attributes = _build_updated_attributes_from_final_list(
-                attributes=[a if isinstance(a, dict) else {"name": getattr(a, "name", "")} for a in attributes],
-                final_attribute_list=result.final_attribute_list,
-            )
-        else:
-            updated_attributes = [a if isinstance(a, dict) else {"name": getattr(a, "name", "")} for a in attributes]
-
-        out = result.model_dump()
-        out["updated_attributes"] = updated_attributes
-        out["candidate_pairs"] = candidate_pairs
-        return out
+        return result
         
     except Exception as e:
         logger.error(f"Error detecting attribute synonyms for entity {entity_name}: {e}", exc_info=True)
         raise
 
 
+class EntityAttributeSynonymResult(BaseModel):
+    """Result for a single entity in batch processing."""
+    entity_name: str = Field(description="Name of the entity")
+    synonyms: List[AttributeSynonymInfo] = Field(
+        default_factory=list,
+        description="List of synonym pairs with merge decisions"
+    )
+    merged_attributes: List[str] = Field(
+        default_factory=list,
+        description="List of attribute names that should be removed after merging"
+    )
+    final_attribute_list: List[str] = Field(
+        default_factory=list,
+        description="Final consolidated list of unique attribute names after merging"
+    )
+
+
+class AttributeSynonymBatchOutput(BaseModel):
+    """Output structure for Step 2.3 batch processing."""
+    entity_results: List[EntityAttributeSynonymResult] = Field(
+        description="List of attribute synonym detection results, one per entity"
+    )
+    total_entities: int = Field(description="Total number of entities processed")
+
+
 async def step_2_3_attribute_synonym_detection_batch(
-    entities: List[Dict[str, Any]],
-    entity_attributes: Dict[str, List[Dict[str, Any]]],  # entity_name -> attributes
+    entities: List,
+    entity_attributes: dict,  # entity_name -> attributes
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> AttributeSynonymBatchOutput:
     """
     Step 2.3: Detect attribute synonyms for all entities (parallel execution).
     
@@ -436,26 +445,27 @@ async def step_2_3_attribute_synonym_detection_batch(
         nl_description: Optional original NL description
         
     Returns:
-        dict: Synonym detection results for all entities, keyed by entity name
+        AttributeSynonymBatchOutput: Synonym detection results for all entities
         
     Example:
         >>> result = await step_2_3_attribute_synonym_detection_batch(
         ...     entities=[{"name": "Customer"}],
         ...     entity_attributes={"Customer": [{"name": "email"}, {"name": "email_address"}]}
         ... )
-        >>> "Customer" in result["entity_results"]
-        True
+        >>> len(result.entity_results)
+        1
     """
     logger.info(f"Starting Step 2.3: Attribute Synonym Detection for {len(entities)} entities")
     
     if not entities:
         logger.warning("No entities provided for attribute synonym detection")
-        return {"entity_results": {}}
+        return AttributeSynonymBatchOutput(entity_results=[], total_entities=0)
     
     # Execute in parallel for all entities
     import asyncio
     
     tasks = []
+    task_metadata = []  # Store entity_name for each task
     for entity in entities:
         entity_name = entity.get("name", "Unknown") if isinstance(entity, dict) else getattr(entity, "name", "Unknown")
         attributes = entity_attributes.get(entity_name, [])
@@ -465,32 +475,51 @@ async def step_2_3_attribute_synonym_detection_batch(
             attributes=attributes,
             nl_description=nl_description,
         )
-        tasks.append((entity_name, task))
+        tasks.append(task)
+        task_metadata.append(entity_name)
     
     # Wait for all tasks to complete
     results = await asyncio.gather(
-        *[task for _, task in tasks],
+        *tasks,
         return_exceptions=True
     )
     
     # Process results
-    entity_results = {}
-    updated_attributes = {}
-    for i, ((entity_name, _), result) in enumerate(zip(tasks, results)):
+    entity_results_list = []
+    for entity_name, result in zip(task_metadata, results):
         if isinstance(result, Exception):
             logger.error(f"Error processing entity {entity_name}: {result}")
-            entity_results[entity_name] = {
-                "synonyms": [],
-                "merged_attributes": [],
-                "final_attribute_list": entity_attributes.get(entity_name, []),
-            }
-            updated_attributes[entity_name] = entity_attributes.get(entity_name, [])
+            # Get original attributes for fallback
+            original_attrs = entity_attributes.get(entity_name, [])
+            original_attr_names = [a.get("name", "") if isinstance(a, dict) else getattr(a, "name", "") for a in original_attrs]
+            entity_results_list.append(
+                EntityAttributeSynonymResult(
+                    entity_name=entity_name,
+                    synonyms=[],
+                    merged_attributes=[],
+                    final_attribute_list=original_attr_names,
+                )
+            )
         else:
-            entity_results[entity_name] = result
-            updated_attributes[entity_name] = result.get("updated_attributes", entity_attributes.get(entity_name, []))
+            # Ensure result is a Pydantic model, not a dict
+            if isinstance(result, dict):
+                logger.warning(f"Entity {entity_name}: Received dict instead of Pydantic model, converting...")
+                result = AttributeSynonymOutput.model_validate(result)
+            
+            entity_results_list.append(
+                EntityAttributeSynonymResult(
+                    entity_name=entity_name,
+                    synonyms=result.synonyms,
+                    merged_attributes=result.merged_attributes,
+                    final_attribute_list=result.final_attribute_list,
+                )
+            )
     
-    total_merged = sum(len(r.get("merged_attributes", [])) for r in entity_results.values())
-    logger.info(f"Attribute synonym detection completed: {total_merged} attributes merged across {len(entity_results)} entities")
+    total_merged = sum(len(r.merged_attributes) for r in entity_results_list)
+    logger.info(f"Attribute synonym detection completed: {total_merged} attributes merged across {len(entity_results_list)} entities")
     
-    return {"entity_results": entity_results, "updated_attributes": updated_attributes}
+    return AttributeSynonymBatchOutput(
+        entity_results=entity_results_list,
+        total_entities=len(entities),
+    )
 

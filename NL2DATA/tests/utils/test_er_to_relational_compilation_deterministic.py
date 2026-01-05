@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from NL2DATA.ir.models.er_relational import ERDesign, EREntity, ERRelation, ERAttribute
-from NL2DATA.phases.phase3.step_3_5_relational_schema_compilation import step_3_5_relational_schema_compilation
+from NL2DATA.phases.phase4.step_4_3_relational_schema_compilation import step_4_3_relational_schema_compilation
 
 
 def _table(schema: dict, name: str) -> dict:
@@ -327,7 +327,7 @@ def test_er_to_relational_compilation_deterministic() -> None:
         print(f"    - {rel.type}: {', '.join(rel.entities)}{rel_attrs}")
     
     print("\n[STEP 2] Compiling relational schema from ER design...")
-    schema = step_3_5_relational_schema_compilation(
+    schema = step_4_3_relational_schema_compilation(
         er_design=er.model_dump(),
         foreign_keys=[],
         primary_keys={

@@ -4,13 +4,14 @@ Checks for duplicate entities, synonyms, or entities that should be merged.
 Prevents schema bloat and confusion.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.phases.phase1.utils import (
     extract_entity_name,
     extract_entity_description,
@@ -134,11 +135,11 @@ class EntityConsolidationOutput(BaseModel):
 
 @traceable_step("1.7", phase=1, tags=["entity_consolidation"])
 async def step_1_7_entity_consolidation(
-    key_entities: List[Dict[str, Any]],
-    auxiliary_entities: Optional[List[Dict[str, Any]]] = None,
+    key_entities: List,
+    auxiliary_entities: Optional[List] = None,
     domain: Optional[str] = None,
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> EntityConsolidationOutput:
     """
     Step 1.7: Check for duplicate entities, synonyms, or entities that should be merged.
     
@@ -175,11 +176,11 @@ async def step_1_7_entity_consolidation(
     
     if not all_entities:
         logger.warning("No entities provided for consolidation")
-        return {
-            "duplicates": [],
-            "merged_entities": [],
-            "final_entity_list": []
-        }
+        return EntityConsolidationOutput(
+            merge_decisions=[],
+            rename_suggestions=[],
+            final_entities=[]
+        )
     
     logger.debug(f"Consolidating {len(all_entities)} entities ({len(key_entities) if key_entities else 0} key, {len(auxiliary_entities) if auxiliary_entities else 0} auxiliary)")
     
@@ -195,6 +196,15 @@ async def step_1_7_entity_consolidation(
         n = extract_entity_name(entity)
         d = extract_entity_description(entity, default="No description")
         registry_items.append({"name": n, "description": d, "origin": "auxiliary"})
+
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=EntityConsolidationOutput,
+        additional_requirements=[
+            "If merging, merged_entity_name MUST be one of entity1 or entity2 (do not invent new names)",
+            "Every merge decision must include evidence: definition_overlap + grain check + counterexample if NOT merging"
+        ]
+    )
 
     # System prompt
     # NOTE: We intentionally avoid domain/nl_description to reduce bias-driven merges.
@@ -213,34 +223,7 @@ Rules:
 - If you merge, set merged_entity_name to ONE OF the ORIGINAL entity names (entity1 or entity2). Do not invent new names.
 - Every decision must include evidence: definition_overlap + grain check + at least one counterexample if you choose NOT to merge.
 
-Output schema (STRICT - must match exactly):
-{
-  "merge_decisions": [
-    {
-      "entity1": "string",
-      "entity2": "string",
-      "similarity": 0.0,
-      "should_merge": true,
-      "merged_entity_name": "string|null",
-      "evidence": {
-        "definition_overlap": "string",
-        "grain_conflict": "string|null",
-        "counterexample": "string|null"
-      },
-      "reasoning": "string"
-    }
-  ],
-  "rename_suggestions": [
-    {
-      "from": "string",
-      "to": "string",
-      "reason": "string"
-    }
-  ],
-  "final_entities": ["string"]
-}
-
-Output MUST be valid JSON matching the schema above. Output JSON only. No markdown. No extra keys."""
+""" + output_structure_section
     
     # Human prompt template: structured registry only
     import json
@@ -294,8 +277,7 @@ CandidatePairs (JSON):
 
         logger.info("Final entities: %s", result.final_entities)
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error in entity consolidation: {e}", exc_info=True)

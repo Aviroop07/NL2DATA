@@ -1,9 +1,22 @@
-"""Phase 1: Domain & Entity Discovery."""
+"""Phase 1: Domain & Entity Discovery.
+
+Note: Step 1.3 (domain inference) was merged into Step 1.1. The legacy
+implementation remains available for compatibility in tests/debugging but is
+deprecated — prefer `step_1_1_domain_detection` for domain detection/inference.
+"""
 
 from .model_router import get_model_for_step as get_model_for_phase1_step
+import warnings
+
+# Emit a deprecation warning when this module is imported to surface the change
+# to developers and test/debug scripts that still reference step 1.3.
+warnings.warn(
+    "Phase1: step_1_3_domain_inference is deprecated; "
+    "use step_1_1_domain_detection (merged explicit detection + inference).",
+    DeprecationWarning,
+)
 from .step_1_1_domain_detection import step_1_1_domain_detection
 from .step_1_2_entity_mention_detection import step_1_2_entity_mention_detection
-from .step_1_3_domain_inference import step_1_3_domain_inference
 from .step_1_4_key_entity_extraction import step_1_4_key_entity_extraction
 from .step_1_5_relation_mention_detection import step_1_5_relation_mention_detection
 from .step_1_6_auxiliary_entity_suggestion import step_1_6_auxiliary_entity_suggestion
@@ -26,7 +39,6 @@ __all__ = [
     "get_model_for_phase1_step",
     "step_1_1_domain_detection",
     "step_1_2_entity_mention_detection",
-    "step_1_3_domain_inference",
     "step_1_4_key_entity_extraction",
     "step_1_5_relation_mention_detection",
     "step_1_6_auxiliary_entity_suggestion",

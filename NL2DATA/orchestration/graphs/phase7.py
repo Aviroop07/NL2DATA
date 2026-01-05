@@ -1,217 +1,106 @@
-"""Phase 7: Generation Strategies Graph."""
+"""Phase 7: Information Mining Graph.
+
+This phase handles information need identification and SQL validation.
+"""
 
 from typing import Dict, Any
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from ..state import IRGenerationState
-from .common import logger
-
-
-def _wrap_step_7_1(step_func):
-    """Wrap Step 7.1 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 7.1: Numerical Range Definition")
-        prev_answers = state.get("previous_answers", {})
-        result = await step_func(
-            entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
-            data_types=state.get("data_types", {}),
-            constraint_specs=state.get("constraint_specs", []),
-            nl_description=state["nl_description"]
-        )
-        
-        # Update generation strategies
-        generation_strategies = state.get("generation_strategies", {})
-        entity_results = result.get("entity_results", {})
-        for entity_name, entity_result in entity_results.items():
-            if entity_name not in generation_strategies:
-                generation_strategies[entity_name] = {}
-            for attr_name, strategy in entity_result.get("attribute_strategies", {}).items():
-                if attr_name not in generation_strategies[entity_name]:
-                    generation_strategies[entity_name][attr_name] = {}
-                generation_strategies[entity_name][attr_name].update(strategy)
-        
-        return {
-            "generation_strategies": generation_strategies,
-            "current_step": "7.1",
-            "previous_answers": {**prev_answers, "7.1": result}
-        }
-    return node
-
-
-def _wrap_step_7_2(step_func):
-    """Wrap Step 7.2 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 7.2: Text Generation Strategy")
-        prev_answers = state.get("previous_answers", {})
-        result = await step_func(
-            entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
-            data_types=state.get("data_types", {}),
-            domain=state.get("domain"),
-            nl_description=state["nl_description"]
-        )
-        
-        # Update generation strategies
-        generation_strategies = state.get("generation_strategies", {})
-        entity_results = result.get("entity_results", {})
-        for entity_name, entity_result in entity_results.items():
-            if entity_name not in generation_strategies:
-                generation_strategies[entity_name] = {}
-            for attr_name, strategy in entity_result.get("attribute_strategies", {}).items():
-                if attr_name not in generation_strategies[entity_name]:
-                    generation_strategies[entity_name][attr_name] = {}
-                generation_strategies[entity_name][attr_name].update(strategy)
-        
-        return {
-            "generation_strategies": generation_strategies,
-            "current_step": "7.2",
-            "previous_answers": {**prev_answers, "7.2": result}
-        }
-    return node
-
-
-def _wrap_step_7_3(step_func):
-    """Wrap Step 7.3 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 7.3: Boolean Dependency Analysis")
-        prev_answers = state.get("previous_answers", {})
-        result = await step_func(
-            entities=state.get("entities", []),
-            attributes=state.get("attributes", {}),
-            data_types=state.get("data_types", {}),
-            relations=state.get("relations", [])
-        )
-        
-        # Update generation strategies
-        generation_strategies = state.get("generation_strategies", {})
-        entity_results = result.get("entity_results", {})
-        for entity_name, entity_result in entity_results.items():
-            if entity_name not in generation_strategies:
-                generation_strategies[entity_name] = {}
-            for attr_name, strategy in entity_result.get("attribute_strategies", {}).items():
-                if attr_name not in generation_strategies[entity_name]:
-                    generation_strategies[entity_name][attr_name] = {}
-                generation_strategies[entity_name][attr_name].update(strategy)
-        
-        return {
-            "generation_strategies": generation_strategies,
-            "current_step": "7.3",
-            "previous_answers": {**prev_answers, "7.3": result}
-        }
-    return node
-
-
-def _wrap_step_7_4(step_func):
-    """Wrap Step 7.4 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 7.4: Data Volume Specifications")
-        prev_answers = state.get("previous_answers", {})
-        result = await step_func(
-            entities=state.get("entities", []),
-            entity_cardinalities=state.get("entity_cardinalities", {}),
-            nl_description=state["nl_description"]
-        )
-        
-        return {
-            "current_step": "7.4",
-            "previous_answers": {**prev_answers, "7.4": result},
-            "metadata": {
-                **state.get("metadata", {}),
-                "data_volumes": result.get("entity_volumes", {})
-            }
-        }
-    return node
-
-
-def _wrap_step_7_5(step_func):
-    """Wrap Step 7.5 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 7.5: Partitioning Strategy")
-        prev_answers = state.get("previous_answers", {})
-        metadata = state.get("metadata", {})
-        result = await step_func(
-            entities=state.get("entities", []),
-            entity_volumes=metadata.get("data_volumes", {}),
-            nl_description=state["nl_description"]
-        )
-        
-        return {
-            "current_step": "7.5",
-            "previous_answers": {**prev_answers, "7.5": result}
-        }
-    return node
-
-
-def _wrap_step_7_6(step_func):
-    """Wrap Step 7.6 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 7.6: Distribution Compilation")
-        prev_answers = state.get("previous_answers", {})
-        result = await step_func(
-            generation_strategies=state.get("generation_strategies", {}),
-            entities=state.get("entities", []),
-            attributes=state.get("attributes", {})
-        )
-        
-        return {
-            "current_step": "7.6",
-            "previous_answers": {**prev_answers, "7.6": result},
-            "metadata": {
-                **state.get("metadata", {}),
-                "generation_ir": result
-            }
-        }
-    return node
+from .common import logger, invoke_step_checked
 
 
 def create_phase_7_graph() -> StateGraph:
-    """Create LangGraph StateGraph for Phase 7 (Generation Strategies).
+    """Create LangGraph StateGraph for Phase 7 (Information Mining).
     
-    This graph orchestrates all Phase 7 steps:
-    1. Numerical Range Definition (7.1) - parallel per numerical attribute
-    2. Text Generation Strategy (7.2) - parallel per text attribute
-    3. Boolean Dependency Analysis (7.3) - parallel per boolean attribute
-    4. Data Volume Specifications (7.4) - singular
-    5. Partitioning Strategy (7.5) - parallel per entity (conditional)
-    6. Distribution Compilation (7.6) - deterministic
-    
-    Returns:
-        Compiled StateGraph ready for execution
+    IMPORTANT: No schema modification - only identifies information needs and validates SQL queries.
     """
     from NL2DATA.phases.phase7 import (
-        step_7_1_numerical_range_definition_batch,
-        step_7_2_text_generation_strategy_batch,
-        step_7_3_boolean_dependency_analysis_batch,
-        step_7_4_data_volume_specifications,
-        step_7_5_partitioning_strategy_batch,
-        step_7_6_distribution_compilation,
+        step_7_1_information_need_identification_with_loop,
+        step_7_2_sql_generation_and_validation_batch,
     )
     
-    # Create graph
     workflow = StateGraph(IRGenerationState)
     
-    # Add nodes
-    workflow.add_node("numerical_ranges", _wrap_step_7_1(step_7_1_numerical_range_definition_batch))
-    workflow.add_node("text_strategies", _wrap_step_7_2(step_7_2_text_generation_strategy_batch))
-    workflow.add_node("boolean_dependencies", _wrap_step_7_3(step_7_3_boolean_dependency_analysis_batch))
-    workflow.add_node("data_volumes", _wrap_step_7_4(step_7_4_data_volume_specifications))
-    workflow.add_node("partitioning", _wrap_step_7_5(step_7_5_partitioning_strategy_batch))
-    workflow.add_node("distribution_compilation", _wrap_step_7_6(step_7_6_distribution_compilation))
+    async def information_needs(state: IRGenerationState) -> Dict[str, Any]:
+        logger.info("[LangGraph] Executing Step 7.1: Information Need Identification")
+        metadata = state.get("metadata", {})
+        relational_schema = metadata.get("relational_schema", {})
+        
+        result = await invoke_step_checked(
+            step_7_1_information_need_identification_with_loop,
+            nl_description=state.get("nl_description", ""),
+            entities=state.get("entities", []),
+            relations=state.get("relations", []),
+            attributes=state.get("attributes", {}),
+            primary_keys=state.get("primary_keys", {}),
+            foreign_keys=state.get("foreign_keys", []),
+            domain=state.get("domain"),
+            max_iterations=10,
+            max_time_sec=300,
+        )
+        # Handle both Pydantic model and dict formats
+        if hasattr(result, 'final_result'):
+            final_result = result.final_result
+            if hasattr(final_result, 'information_needs'):
+                information_needs_list = final_result.information_needs
+            elif isinstance(final_result, dict):
+                information_needs_list = final_result.get("information_needs", [])
+            else:
+                information_needs_list = []
+        elif isinstance(result, dict):
+            final_result = result.get("final_result", {})
+            information_needs_list = final_result.get("information_needs", []) if isinstance(final_result, dict) else []
+        else:
+            information_needs_list = []
+        return {
+            **state,
+            "information_needs": information_needs_list,
+            "previous_answers": {**state.get("previous_answers", {}), "7.1": result},
+        }
     
-    # Set entry point
-    workflow.set_entry_point("numerical_ranges")
+    async def sql_validation(state: IRGenerationState) -> Dict[str, Any]:
+        logger.info("[LangGraph] Executing Step 7.2: SQL Generation and Validation")
+        information_needs = state.get("information_needs", [])
+        metadata = state.get("metadata", {})
+        relational_schema = metadata.get("relational_schema", {})
+        nl_description = state.get("nl_description", "")
+        domain = state.get("domain")
+        
+        if not information_needs:
+            logger.info("No information needs found, skipping SQL validation")
+            return {**state, "validated_information_needs": [], "previous_answers": {**state.get("previous_answers", {}), "7.2": {}}}
+        
+        result = await invoke_step_checked(
+            step_7_2_sql_generation_and_validation_batch,
+            information_needs=information_needs,
+            relational_schema=relational_schema,
+            nl_description=nl_description,
+            domain=domain,
+            max_retries=5,
+        )
+        
+        # Handle both Pydantic model and dict formats
+        if hasattr(result, 'validated_information_needs'):
+            validated_needs = result.validated_information_needs
+        elif isinstance(result, dict):
+            validated_needs = result.get("validated_information_needs", [])
+        else:
+            validated_needs = []
+        return {
+            **state,
+            "validated_information_needs": validated_needs,
+            "previous_answers": {**state.get("previous_answers", {}), "7.2": result},
+        }
     
-    # Add edges (parallel execution for 7.1, 7.2, 7.3)
-    workflow.add_edge("numerical_ranges", "text_strategies")
-    workflow.add_edge("text_strategies", "boolean_dependencies")
-    workflow.add_edge("boolean_dependencies", "data_volumes")
-    workflow.add_edge("data_volumes", "partitioning")
-    workflow.add_edge("partitioning", "distribution_compilation")
-    workflow.add_edge("distribution_compilation", END)
+    workflow.add_node("information_needs", information_needs)
+    workflow.add_node("sql_validation", sql_validation)
     
-    # Compile with checkpointing
+    workflow.set_entry_point("information_needs")
+    workflow.add_edge("information_needs", "sql_validation")
+    workflow.add_edge("sql_validation", END)
+    
     checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)
-

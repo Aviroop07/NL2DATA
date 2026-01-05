@@ -120,7 +120,15 @@ def get_model_for_task(
         # task_type is a string (Literal type), so we can use it directly
         task_specific_tokens = max_tokens_per_task.get(task_type)
         tokens = task_specific_tokens or openai_config.get("max_tokens", 16000)
-    req_timeout = timeout or openai_config.get("timeout", 60)
+    # Get timeout: use provided value, or task-specific config, or default
+    if timeout is not None:
+        req_timeout = timeout
+    else:
+        # Check for task-specific timeout config
+        timeout_per_task = openai_config.get("timeout_per_task", {})
+        # task_type is a string (Literal type), so we can use it directly
+        task_specific_timeout = timeout_per_task.get(task_type)
+        req_timeout = task_specific_timeout or openai_config.get("timeout", 180)
     
     # Note: ChatOpenAI doesn't directly support metadata/tags in constructor
     # Metadata and tags are passed via RunnableConfig when invoking the model

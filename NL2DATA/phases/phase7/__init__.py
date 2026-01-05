@@ -1,34 +1,22 @@
-"""Phase 7: Generation Strategies."""
+"""Phase 7: Information Mining.
 
-from .step_7_1_numerical_range_definition import (
-    step_7_1_numerical_range_definition,
-    step_7_1_numerical_range_definition_batch,
+This phase:
+- Step 7.1: Information Need Identification
+- Step 7.2: SQL Generation and Validation
+"""
+
+from .step_7_1_information_need_identification import (
+    step_7_1_information_need_identification,
+    step_7_1_information_need_identification_with_loop,
 )
-from .step_7_2_text_generation_strategy import (
-    step_7_2_text_generation_strategy,
-    step_7_2_text_generation_strategy_batch,
+from .step_7_2_sql_generation_and_validation import (
+    step_7_2_sql_generation_and_validation,
+    step_7_2_sql_generation_and_validation_batch,
 )
-from .step_7_3_boolean_dependency_analysis import (
-    step_7_3_boolean_dependency_analysis,
-    step_7_3_boolean_dependency_analysis_batch,
-)
-from .step_7_4_data_volume_specifications import step_7_4_data_volume_specifications
-from .step_7_5_partitioning_strategy import (
-    step_7_5_partitioning_strategy,
-    step_7_5_partitioning_strategy_batch,
-)
-from .step_7_6_distribution_compilation import step_7_6_distribution_compilation
 
 __all__ = [
-    "step_7_1_numerical_range_definition",
-    "step_7_1_numerical_range_definition_batch",
-    "step_7_2_text_generation_strategy",
-    "step_7_2_text_generation_strategy_batch",
-    "step_7_3_boolean_dependency_analysis",
-    "step_7_3_boolean_dependency_analysis_batch",
-    "step_7_4_data_volume_specifications",
-    "step_7_5_partitioning_strategy",
-    "step_7_5_partitioning_strategy_batch",
-    "step_7_6_distribution_compilation",
+    "step_7_1_information_need_identification",
+    "step_7_1_information_need_identification_with_loop",
+    "step_7_2_sql_generation_and_validation",
+    "step_7_2_sql_generation_and_validation_batch",
 ]
-

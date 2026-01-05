@@ -12,7 +12,7 @@ CRITICAL: Only identify attributes that are intrinsic to the relation itself,
 not attributes that belong to the entities.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase2.model_router import get_model_for_step
@@ -20,6 +20,7 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.ir.models.state import AttributeInfo
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -39,11 +40,11 @@ class RelationIntrinsicAttributesOutput(BaseModel):
 
 @traceable_step("2.15", phase=2, tags=['phase_2_step_15'])
 async def step_2_15_relation_intrinsic_attributes(
-    relation: Dict[str, Any],
-    entity_intrinsic_attributes: Dict[str, List[Dict[str, Any]]],
+    relation: dict,
+    entity_intrinsic_attributes: dict,
     nl_description: Optional[str] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> RelationIntrinsicAttributesOutput:
     """
     Step 2.15 (per-relation): Identify attributes that belong to the relation itself.
     
@@ -122,6 +123,15 @@ async def step_2_15_relation_intrinsic_attributes(
     
     context_msg = "\n\nEnhanced Context:\n" + "\n".join(f"- {part}" for part in context_parts)
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=RelationIntrinsicAttributesOutput,
+        additional_requirements=[
+            "The \"reasoning\" field in each relation attribute is REQUIRED and cannot be omitted",
+            "Reasoning is REQUIRED and cannot be omitted"
+        ]
+    )
+    
     # System prompt with explicit instruction and detailed example
     system_prompt = """You are a database schema design expert. Your task is to identify attributes that belong to a RELATIONSHIP itself, not to the entities it connects.
 
@@ -189,11 +199,7 @@ For each relation attribute, provide:
 - type_hint: Suggested data type hint (e.g., "string", "integer", "decimal", "date", "boolean", "timestamp")
 - reasoning: REQUIRED - Why this attribute belongs to the relation, not to the entities (cannot be omitted)
 
-Return a JSON object with:
-- relation_id: Identifier for the relation
-- relation_attributes: List of attributes that belong to the relation (empty list if none)
-- has_attributes: True if the relation has any intrinsic attributes, False otherwise
-- reasoning: REQUIRED - Explanation of your decision (cannot be omitted)"""
+""" + output_structure_section
     
     # Human prompt template
     human_prompt_template = """Identify attributes that belong to the relation itself, not to the entities.
@@ -237,20 +243,27 @@ Return a JSON object specifying which attributes (if any) belong to the relation
             f"{', '.join([attr.name for attr in result.relation_attributes])}"
         )
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error extracting relation attributes for {relation_id}: {e}", exc_info=True)
         raise
 
 
+class RelationIntrinsicAttributesBatchOutput(BaseModel):
+    """Output structure for Step 2.15 batch processing."""
+    relation_results: List[RelationIntrinsicAttributesOutput] = Field(
+        description="List of relation intrinsic attribute extraction results, one per relation"
+    )
+    total_relations: int = Field(description="Total number of relations processed")
+
+
 async def step_2_15_relation_intrinsic_attributes_batch(
-    relations: List[Dict[str, Any]],
-    entity_intrinsic_attributes: Dict[str, List[Dict[str, Any]]],
+    relations: List,
+    entity_intrinsic_attributes: dict,
     nl_description: Optional[str] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> RelationIntrinsicAttributesBatchOutput:
     """
     Step 2.15: Extract relation intrinsic attributes for all relations (parallel execution).
     
@@ -268,56 +281,58 @@ async def step_2_15_relation_intrinsic_attributes_batch(
     
     if not relations:
         logger.warning("No relations provided for relation attribute extraction")
-        return {"relation_results": {}}
+        return RelationIntrinsicAttributesBatchOutput(relation_results=[], total_relations=0)
     
     # Execute in parallel for all relations
     import asyncio
     
     tasks = []
     for relation in relations:
-        relation_entities = relation.get("entities", [])
-        relation_id = f"{'+'.join(sorted(relation_entities))}"
-        
         task = step_2_15_relation_intrinsic_attributes(
             relation=relation,
             entity_intrinsic_attributes=entity_intrinsic_attributes,
             nl_description=nl_description,
             domain=domain,
         )
-        tasks.append((relation_id, task))
+        tasks.append(task)
     
     # Wait for all tasks to complete
     results = await asyncio.gather(
-        *[task for _, task in tasks],
+        *tasks,
         return_exceptions=True
     )
     
     # Process results
-    relation_results = {}
-    for i, ((relation_id, _), result) in enumerate(zip(tasks, results)):
+    relation_results_list = []
+    for result in results:
         if isinstance(result, Exception):
-            logger.error(f"Error processing relation {relation_id}: {result}")
-            relation_results[relation_id] = {
-                "relation_id": relation_id,
-                "relation_attributes": [],
-                "has_attributes": False,
-                "reasoning": f"Error during analysis: {str(result)}"
-            }
+            logger.error(f"Error processing relation: {result}")
+            relation_results_list.append(
+                RelationIntrinsicAttributesOutput(
+                    relation_id="unknown",
+                    relation_attributes=[],
+                    has_attributes=False,
+                    reasoning=f"Error during analysis: {str(result)}"
+                )
+            )
         else:
-            relation_results[relation_id] = result
+            relation_results_list.append(result)
     
     total_relations_with_attrs = sum(
-        1 for r in relation_results.values()
-        if r.get("has_attributes", False)
+        1 for r in relation_results_list
+        if r.has_attributes
     )
     total_attrs = sum(
-        len(r.get("relation_attributes", []))
-        for r in relation_results.values()
+        len(r.relation_attributes)
+        for r in relation_results_list
     )
     logger.info(
-        f"Relation intrinsic attribute extraction completed: {total_relations_with_attrs}/{len(relation_results)} "
+        f"Relation intrinsic attribute extraction completed: {total_relations_with_attrs}/{len(relation_results_list)} "
         f"relations have attributes, {total_attrs} total relation attributes"
     )
     
-    return {"relation_results": relation_results}
+    return RelationIntrinsicAttributesBatchOutput(
+        relation_results=relation_results_list,
+        total_relations=len(relations),
+    )
 

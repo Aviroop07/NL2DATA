@@ -1,50 +1,25 @@
-"""Phase 5 model router for step-specific model selection.
+"""Model router for Phase 5 (Data Type Assignment)."""
 
-This module provides model selection for Phase 5 steps, mapping each step
-to the appropriate task type and model.
-"""
+from NL2DATA.utils.llm.base_router import get_model_for_task
 
-from typing import Optional
-from langchain_openai import ChatOpenAI
-
-from NL2DATA.utils.llm.base_router import get_model_for_task, TaskType
-from NL2DATA.utils.logging import get_logger
-
-logger = get_logger(__name__)
-
-# Phase 5 step to task type mapping
-PHASE5_STEP_MAPPING: dict[str, TaskType] = {
-    "5.3": "important",  # DDL Error Correction - important, conditional
-    "5.5": "important",  # SQL Query Generation - important, per-information need
-    # 5.1, 5.2, 5.4 are deterministic (no LLM)
+# Phase 5 step mappings
+STEP_TO_TASK_TYPE = {
+    "5.1": "simple",      # Dependency graph construction (deterministic, but may need LLM for derived deps)
+    "5.2": "high_fanout", # Independent attribute data types (parallel per attribute, excludes FKs)
+    "5.3": "simple",      # FK derivation (deterministic)
+    "5.4": "high_fanout", # Dependent attribute data types (parallel per attribute, derived handled deterministically)
+    "5.5": "simple",      # Nullability detection (excludes PKs and FKs with total participation)
 }
 
 
-def get_model_for_step(
-    step_id: str,
-    model_name: Optional[str] = None,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-    timeout: Optional[int] = None,
-) -> ChatOpenAI:
-    """Get model for a specific Phase 5 step.
+def get_model_for_step(step_number: str):
+    """Get LLM model for a Phase 5 step.
     
     Args:
-        step_id: Step identifier (e.g., "5.3", "5.5")
-        model_name: Optional override model name
-        temperature: Optional override temperature
-        max_tokens: Optional override max tokens
-        timeout: Optional override timeout
+        step_number: Step number (e.g., "5.1", "5.2")
         
     Returns:
-        ChatOpenAI model instance configured for the step
+        LLM model instance
     """
-    task_type = PHASE5_STEP_MAPPING.get(step_id, "default")
-    return get_model_for_task(
-        task_type=task_type,
-        model_name=model_name,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-
+    task_type = STEP_TO_TASK_TYPE.get(step_number, "simple")
+    return get_model_for_task(task_type=task_type)

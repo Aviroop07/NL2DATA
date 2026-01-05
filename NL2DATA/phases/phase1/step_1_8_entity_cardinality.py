@@ -3,13 +3,14 @@
 Determines expected cardinality and classifies table type (fact vs dimension) for each entity.
 """
 
-from typing import Dict, Any, List, Optional, Literal
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.phases.phase1.utils.data_extraction import (
     extract_entity_name,
     extract_entity_description,
@@ -53,7 +54,7 @@ async def step_1_8_entity_cardinality_single(
     entity_description: Optional[str] = None,
     nl_description: Optional[str] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> EntityCardinalityInfo:
     """
     Step 1.8 (per-entity): Determine cardinality and table type for a single entity.
     
@@ -89,6 +90,15 @@ async def step_1_8_entity_cardinality_single(
     if context_parts:
         context_msg = "\n\nContext:\n" + "\n".join(f"- {part}" for part in context_parts)
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=EntityCardinalityOutput,
+        additional_requirements=[
+            "Grounding rule: If has_explicit_cardinality=true, cardinality_hint MUST be verbatim substring from description; if false, cardinality_hint MUST be empty string",
+            "Reasoning is REQUIRED and cannot be omitted or empty"
+        ]
+    )
+    
     # System prompt
     system_prompt = """You are a database design assistant.
 
@@ -116,18 +126,7 @@ Provide:
 - table_type: "fact" or "dimension", or null if cannot be determined
 - reasoning: REQUIRED - Clear explanation of your decisions (cannot be omitted)
 
-Output schema (STRICT)
-Return ONLY JSON with exactly:
-{
-  "entity": string,
-  "has_explicit_cardinality": boolean,
-  "cardinality": "small"|"medium"|"large"|"very_large"|null,
-  "cardinality_hint": string,
-  "table_type": "fact"|"dimension"|null,
-  "reasoning": string
-}
-
-No markdown. No extra keys. No extra text."""
+""" + output_structure_section
     
     # Human prompt template
     human_prompt = f"""Entity: {entity_name}{context_msg}
@@ -170,8 +169,7 @@ Original description (if available):
             f"table_type={result.table_type}"
         )
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error analyzing cardinality for entity {entity_name}: {e}", exc_info=True)
@@ -179,10 +177,10 @@ Original description (if available):
 
 
 async def step_1_8_entity_cardinality(
-    entities: List[Dict[str, Any]],
+    entities: List,
     nl_description: Optional[str] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> EntityCardinalityOutput:
     """
     Step 1.8: Determine cardinality and table type for all entities (parallel execution).
     
@@ -207,7 +205,7 @@ async def step_1_8_entity_cardinality(
     
     if not entities:
         logger.warning("No entities provided for cardinality analysis")
-        return {"entity_info": []}
+        return EntityCardinalityOutput(entity_info=[])
     
     # Execute in parallel for all entities
     import asyncio
@@ -232,26 +230,26 @@ async def step_1_8_entity_cardinality(
     entity_info = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            logger.error(f"Error processing entity {entities[i].get('name', 'Unknown')}: {result}")
+            logger.error(f"Error processing entity {entities[i].get('name', 'Unknown') if isinstance(entities[i], dict) else getattr(entities[i], 'name', 'Unknown')}: {result}")
             # Create a default entry for failed entities
             entity_name = entities[i].get("name", "Unknown") if isinstance(entities[i], dict) else getattr(entities[i], "name", "Unknown")
-            entity_info.append({
-                "entity": entity_name,
-                "has_explicit_cardinality": False,
-                "cardinality": None,
-                "cardinality_hint": "",
-                "table_type": None,
-                "reasoning": f"Error during analysis: {str(result)}"
-            })
+            entity_info.append(EntityCardinalityInfo(
+                entity=entity_name,
+                has_explicit_cardinality=False,
+                cardinality=None,
+                cardinality_hint="",
+                table_type=None,
+                reasoning=f"Error during analysis: {str(result)}"
+            ))
         else:
             entity_info.append(result)
     
     logger.info(f"Entity cardinality analysis completed for {len(entity_info)} entities")
     
     # Log summary
-    fact_count = sum(1 for e in entity_info if e.get("table_type") == "fact")
-    dimension_count = sum(1 for e in entity_info if e.get("table_type") == "dimension")
+    fact_count = sum(1 for e in entity_info if e.table_type == "fact")
+    dimension_count = sum(1 for e in entity_info if e.table_type == "dimension")
     logger.info(f"Table type summary: {fact_count} fact tables, {dimension_count} dimension tables")
     
-    return {"entity_info": entity_info}
+    return EntityCardinalityOutput(entity_info=entity_info)
 

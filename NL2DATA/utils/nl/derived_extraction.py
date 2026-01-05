@@ -51,6 +51,71 @@ def _extract_identifiers(expr: str) -> List[str]:
     return re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr or "")
 
 
+def _resolve_identifier_alias(token: str, attributes: Sequence[str]) -> Optional[str]:
+    """Map NL token -> existing attribute name when there's a clear unique match.
+
+    Examples:
+      unit_price -> order_unit_price
+      discount_percent -> order_discount_percent
+    """
+    tok = (token or "").strip()
+    if not tok:
+        return None
+    tok_l = tok.lower()
+    attrs = [a for a in (attributes or []) if isinstance(a, str) and a]
+
+    exact = [a for a in attrs if a.lower() == tok_l]
+    if len(exact) == 1:
+        return exact[0]
+
+    suff = [a for a in attrs if a.lower().endswith("_" + tok_l)]
+    if len(suff) == 1:
+        return suff[0]
+
+    contains = [a for a in attrs if tok_l in a.lower()]
+    if len(contains) == 1:
+        return contains[0]
+
+    # Part-based match (order-insensitive), with light synonym normalization.
+    synonyms = {
+        "percent": "percentage",
+        "pct": "percentage",
+        "qty": "quantity",
+        "dt": "datetime",
+        "num": "number",
+        "amt": "amount",
+    }
+
+    def norm_parts(s: str) -> List[str]:
+        parts = [p for p in (s or "").lower().split("_") if p]
+        return [synonyms.get(p, p) for p in parts]
+
+    tok_parts = set(norm_parts(tok))
+    if len(tok_parts) >= 2:
+        part_matches = []
+        for a in attrs:
+            a_parts = set(norm_parts(a))
+            if tok_parts.issubset(a_parts):
+                part_matches.append(a)
+        if len(part_matches) == 1:
+            return part_matches[0]
+
+    return None
+
+
+def _rewrite_rhs_with_aliases(rhs: str, attributes: Sequence[str]) -> str:
+    """Rewrite RHS by replacing clearly-resolvable tokens with actual attribute names."""
+    out = rhs or ""
+    idents = sorted(set(_extract_identifiers(out)), key=len, reverse=True)
+    for tok in idents:
+        repl = _resolve_identifier_alias(tok, attributes)
+        if not repl or repl == tok:
+            continue
+        # Replace whole-word occurrences only.
+        out = re.sub(rf"\b{re.escape(tok)}\b", repl, out)
+    return out
+
+
 def partition_local_vs_cross_entity(
     *,
     candidates: Sequence[DerivedColumnCandidate],
@@ -62,7 +127,13 @@ def partition_local_vs_cross_entity(
       - local: {attr_name: rhs_hint}
       - cross: {attr_name: rhs_hint}
     """
-    attrs: Set[str] = {a for a in (known_attributes or []) if isinstance(a, str) and a}
+    # Important trick: include candidate names themselves so references like
+    # discount_amount = line_subtotal * discount_percent can become "local"
+    # once line_subtotal is also a candidate.
+    base_attrs: List[str] = [a for a in (known_attributes or []) if isinstance(a, str) and a]
+    candidate_names: List[str] = [c.name for c in candidates if c and c.name]
+    augmented_attrs_list: List[str] = base_attrs + [n for n in candidate_names if n not in base_attrs]
+    attrs: Set[str] = set(augmented_attrs_list)
     funcs: Set[str] = {f.upper() for f in supported_function_names()}
     keywords = {
         "IF",
@@ -86,7 +157,7 @@ def partition_local_vs_cross_entity(
 
     for c in candidates:
         name = c.name
-        rhs = c.rhs
+        rhs = _rewrite_rhs_with_aliases(c.rhs, augmented_attrs_list)
         if not name or not rhs:
             continue
         idents = _extract_identifiers(rhs)

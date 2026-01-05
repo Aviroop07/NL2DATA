@@ -5,8 +5,18 @@ Project standard (Phase 1 -> Phase 2):
 - Split large user context into multiple user messages for readability and better compliance.
 """
 
+import warnings
 from typing import TypeVar, Type, Optional, Any, Dict, List
 from pydantic import BaseModel, ValidationError
+
+# Suppress LangChain warnings about Pydantic response_format streaming
+# These are harmless warnings that occur when using with_structured_output
+warnings.filterwarnings(
+    "ignore",
+    message="Streaming with Pydantic response_format not yet supported",
+    category=UserWarning,
+    module="langchain_openai.chat_models.base"
+)
 
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
@@ -29,9 +39,38 @@ from NL2DATA.utils.logging import get_logger
 from NL2DATA.utils.llm.prompt_validation import safe_create_prompt_template
 from NL2DATA.utils.llm.error_feedback import create_error_feedback_message, NoneOutputError, NoneFieldError
 from NL2DATA.utils.llm.model_validation import validate_no_none_fields
-from NL2DATA.utils.llm.json_schema_fix import get_openai_compatible_json_schema
+from NL2DATA.utils.llm.json_schema_fix import get_openai_compatible_json_schema, _sanitize_for_json
 
 logger = get_logger(__name__)
+
+# Monkey-patch JSONEncoder.default to sanitize type objects before serialization
+import json
+_original_default = json.JSONEncoder.default
+
+def _patched_default(self, obj):
+    """Override JSONEncoder.default to handle type objects."""
+    if isinstance(obj, type):
+        return obj.__name__
+    # Try original default first
+    try:
+        return _original_default(self, obj)
+    except TypeError:
+        # If original fails with TypeError, try to sanitize
+        try:
+            sanitized = _sanitize_for_json(obj)
+            if sanitized is not obj:
+                # Sanitization changed it, try encoding the sanitized version
+                return sanitized
+            # Sanitization didn't change it, re-raise original error
+            raise
+        except Exception:
+            # If sanitization also fails, re-raise original error
+            raise
+
+# Only patch if not already patched
+if json.JSONEncoder.default is _original_default:
+    json.JSONEncoder.default = _patched_default
+    logger.debug("Patched json.JSONEncoder.default to sanitize type objects")
 
 # Try to import pipeline logger (may not be available in all contexts)
 try:
@@ -252,13 +291,38 @@ def create_structured_chain(
     split_messages_runnable = RunnableLambda(_split_prompt_messages)
 
     # Use with_structured_output (preferred method for OpenAI models)
-    # Note: We can't directly customize the JSON schema that with_structured_output uses,
-    # but Pydantic v2's model_json_schema() should handle additionalProperties correctly.
+    # Note: We use the model's custom schema generator (configured via ConfigDict)
+    # which should handle additionalProperties and required arrays correctly.
     # If we still get schema errors, they'll be caught and we'll fall back to parser.
     chain = None
     if not use_parser:
         try:
-            structured_llm = llm.with_structured_output(output_schema)
+            # Try to use the model's custom schema generator if configured
+            # The model should have schema_generator in ConfigDict if it needs OpenAI compatibility
+            # For models with Dict fields that need additionalProperties: false, use function_calling method
+            # which is more lenient with schema validation
+            model_config = getattr(output_schema, "model_config", None)
+            has_custom_schema = model_config and hasattr(model_config, "schema_generator")
+            
+            # Check if model has Dict fields that might cause schema issues
+            has_dict_fields = any(
+                "Dict" in str(field.annotation) or "dict" in str(field.annotation).lower()
+                for field in output_schema.model_fields.values()
+            )
+            
+            # Try json_schema method first (even for Dict fields) - our custom schema generator should handle it
+            # Only fall back to function_calling if json_schema fails
+            try:
+                structured_llm = llm.with_structured_output(output_schema, method="json_schema")
+                if has_dict_fields:
+                    logger.debug(f"Using json_schema method for {output_schema.__name__} (has Dict fields, custom schema generator enabled)")
+                else:
+                    logger.debug(f"Using json_schema method for {output_schema.__name__}")
+            except Exception as schema_error:
+                # Fall back to function_calling if json_schema fails
+                logger.debug(f"json_schema method failed for {output_schema.__name__}, using function_calling: {schema_error}")
+                structured_llm = llm.with_structured_output(output_schema, method="function_calling")
+            
             chain = prompt | split_messages_runnable | structured_llm
             logger.debug(f"Created chain using with_structured_output for {output_schema.__name__}")
             if tools_bound:
@@ -268,10 +332,17 @@ def create_structured_chain(
                     f"this may cause parsing errors. Consider using use_parser=True or removing tools."
                 )
         except Exception as e:
-            logger.warning(
-                f"with_structured_output failed for {output_schema.__name__}, "
-                f"falling back to PydanticOutputParser: {e}"
-            )
+            error_msg = str(e).lower()
+            if "invalid schema" in error_msg or "response_format" in error_msg or "required" in error_msg:
+                logger.warning(
+                    f"with_structured_output schema validation failed for {output_schema.__name__}: {e}. "
+                    f"Falling back to PydanticOutputParser (parser mode)."
+                )
+            else:
+                logger.warning(
+                    f"with_structured_output failed for {output_schema.__name__}, "
+                    f"falling back to PydanticOutputParser: {e}"
+                )
             # Fallback to parser if with_structured_output fails
             use_parser = True
     
@@ -334,6 +405,12 @@ async def invoke_with_retry(
     # Otherwise, use custom retry logic with error feedback
     import asyncio
     from openai import RateLimitError, APIError, BadRequestError
+    # Try to import httpx timeout exceptions (may not be available)
+    try:
+        from httpx import TimeoutException, ReadTimeout, ConnectTimeout
+        HTTPX_TIMEOUT_EXCEPTIONS = (TimeoutException, ReadTimeout, ConnectTimeout)
+    except ImportError:
+        HTTPX_TIMEOUT_EXCEPTIONS = ()
     
     # Try to extract output schema from chain (for better error feedback)
     output_schema = None
@@ -553,12 +630,46 @@ async def invoke_with_retry(
             else:
                 logger.error(f"Chain invocation failed after {max_retries} attempts: {e}")
                 raise
+        except (asyncio.CancelledError, TimeoutError, *HTTPX_TIMEOUT_EXCEPTIONS) as e:
+            # Network timeout or cancellation - retry with exponential backoff
+            last_exception = e
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                error_type = type(e).__name__
+                logger.warning(
+                    f"Chain invocation timed out or was cancelled (attempt {attempt + 1}/{max_retries}): {error_type}: {e}. "
+                    f"Retrying in {wait_time:.1f}s..."
+                )
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Chain invocation failed after {max_retries} attempts due to timeout/cancellation: {e}")
+                raise
         except (ValidationError, OutputParserException, NoneOutputError, NoneFieldError) as e:
             # Output parsing/schema errors - capture for feedback
             last_exception = e
             # Try to extract raw output from exception
             if isinstance(e, OutputParserException) and hasattr(e, "llm_output"):
                 last_raw_output = str(e.llm_output)
+            elif isinstance(e, ValidationError):
+                # Try to extract input data from ValidationError
+                # Pydantic ValidationError has errors() method with input data
+                try:
+                    errors = e.errors()
+                    if errors and len(errors) > 0:
+                        # Try to get input from first error
+                        first_error = errors[0]
+                        if "input" in first_error:
+                            input_data = first_error["input"]
+                            if isinstance(input_data, (dict, str)):
+                                last_raw_output = str(input_data)[:1000]
+                        # Also try to get input from exception args
+                        if not last_raw_output and hasattr(e, "args") and len(e.args) > 0:
+                            last_raw_output = str(e.args[0])[:1000]
+                except Exception:
+                    pass
+                # If still no raw output, use error message
+                if not last_raw_output:
+                    last_raw_output = str(e)[:500]
             elif isinstance(e, (ValueError, NoneOutputError)) and "Output:" in str(e):
                 # Try to extract output from error message
                 try:

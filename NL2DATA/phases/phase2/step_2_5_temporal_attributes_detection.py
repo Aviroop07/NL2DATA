@@ -4,13 +4,14 @@ Determines if entities need temporal attributes (created_at, updated_at timestam
 Common pattern in modern applications for audit trails.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -31,7 +32,7 @@ async def step_2_5_temporal_attributes_detection(
     nl_description: Optional[str] = None,
     entity_description: Optional[str] = None,
     existing_attributes: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+) -> TemporalAttributesOutput:
     """
     Step 2.5 (per-entity): Determine if entity needs temporal attributes.
     
@@ -68,6 +69,15 @@ async def step_2_5_temporal_attributes_detection(
     if context_parts:
         context_msg = "\n\nContext:\n" + "\n".join(f"- {part}" for part in context_parts)
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=TemporalAttributesOutput,
+        additional_requirements=[
+            "The \"reasoning\" field is REQUIRED and cannot be omitted or empty",
+            "Check if temporal attributes already exist in the attribute list - don't suggest duplicates"
+        ]
+    )
+    
     # System prompt
     system_prompt = """You are a database design assistant. Your task is to determine if an entity needs temporal attributes (timestamps) for audit trails and tracking.
 
@@ -93,10 +103,7 @@ Important:
 - Consider the entity type: transactional entities typically need temporal attributes
 - Consider domain patterns: modern applications often include audit trails
 
-Provide:
-- needs_temporal: Whether temporal attributes should be added
-- temporal_attributes: List of temporal attribute names to add (e.g., ["created_at", "updated_at"])
-- reasoning: REQUIRED - Clear explanation of why temporal attributes are or aren't needed (cannot be omitted)"""
+""" + output_structure_section
     
     # Human prompt template
     human_prompt = f"""Entity: {entity_name}{context_msg}
@@ -126,19 +133,37 @@ Original description (if available):
             f"temporal_attributes={result.temporal_attributes}"
         )
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error detecting temporal attributes for entity {entity_name}: {e}", exc_info=True)
         raise
 
 
+class EntityTemporalAttributesResult(BaseModel):
+    """Result for a single entity in batch processing."""
+    entity_name: str = Field(description="Name of the entity")
+    needs_temporal: bool = Field(description="Whether the entity needs temporal attributes")
+    temporal_attributes: List[str] = Field(
+        default_factory=list,
+        description="List of temporal attribute names to add"
+    )
+    reasoning: str = Field(description="Reasoning for temporal attribute decision")
+
+
+class TemporalAttributesBatchOutput(BaseModel):
+    """Output structure for Step 2.5 batch processing."""
+    entity_results: List[EntityTemporalAttributesResult] = Field(
+        description="List of temporal attribute detection results, one per entity"
+    )
+    total_entities: int = Field(description="Total number of entities processed")
+
+
 async def step_2_5_temporal_attributes_detection_batch(
-    entities: List[Dict[str, Any]],
-    entity_attributes: Optional[Dict[str, List[str]]] = None,  # entity_name -> attribute list
+    entities: List,
+    entity_attributes: Optional[dict] = None,  # entity_name -> attribute list
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> TemporalAttributesBatchOutput:
     """
     Step 2.5: Detect temporal attributes for all entities (parallel execution).
     
@@ -148,25 +173,26 @@ async def step_2_5_temporal_attributes_detection_batch(
         nl_description: Optional original NL description
         
     Returns:
-        dict: Temporal attribute detection results for all entities, keyed by entity name
+        TemporalAttributesBatchOutput: Temporal attribute detection results for all entities
         
     Example:
         >>> result = await step_2_5_temporal_attributes_detection_batch(
         ...     entities=[{"name": "Customer"}]
         ... )
-        >>> "Customer" in result["entity_results"]
-        True
+        >>> len(result.entity_results)
+        1
     """
     logger.info(f"Starting Step 2.5: Temporal Attributes Detection for {len(entities)} entities")
     
     if not entities:
         logger.warning("No entities provided for temporal attribute detection")
-        return {"entity_results": {}}
+        return TemporalAttributesBatchOutput(entity_results=[], total_entities=0)
     
     # Execute in parallel for all entities
     import asyncio
     
     tasks = []
+    task_metadata = []  # Store entity_name for each task
     for entity in entities:
         entity_name = entity.get("name", "Unknown") if isinstance(entity, dict) else getattr(entity, "name", "Unknown")
         entity_desc = entity.get("description", "") if isinstance(entity, dict) else getattr(entity, "description", "")
@@ -178,29 +204,43 @@ async def step_2_5_temporal_attributes_detection_batch(
             entity_description=entity_desc,
             existing_attributes=existing_attrs,
         )
-        tasks.append((entity_name, task))
+        tasks.append(task)
+        task_metadata.append(entity_name)
     
     # Wait for all tasks to complete
     results = await asyncio.gather(
-        *[task for _, task in tasks],
+        *tasks,
         return_exceptions=True
     )
     
     # Process results
-    entity_results = {}
-    for i, ((entity_name, _), result) in enumerate(zip(tasks, results)):
+    entity_results_list = []
+    for entity_name, result in zip(task_metadata, results):
         if isinstance(result, Exception):
             logger.error(f"Error processing entity {entity_name}: {result}")
-            entity_results[entity_name] = {
-                "needs_temporal": False,
-                "temporal_attributes": [],
-                "reasoning": f"Error during analysis: {str(result)}"
-            }
+            entity_results_list.append(
+                EntityTemporalAttributesResult(
+                    entity_name=entity_name,
+                    needs_temporal=False,
+                    temporal_attributes=[],
+                    reasoning=f"Error during analysis: {str(result)}"
+                )
+            )
         else:
-            entity_results[entity_name] = result
+            entity_results_list.append(
+                EntityTemporalAttributesResult(
+                    entity_name=entity_name,
+                    needs_temporal=result.needs_temporal,
+                    temporal_attributes=result.temporal_attributes,
+                    reasoning=result.reasoning,
+                )
+            )
     
-    total_temporal = sum(len(r.get("temporal_attributes", [])) for r in entity_results.values())
-    logger.info(f"Temporal attribute detection completed: {total_temporal} temporal attributes added across {len(entity_results)} entities")
+    total_temporal = sum(len(r.temporal_attributes) for r in entity_results_list)
+    logger.info(f"Temporal attribute detection completed: {total_temporal} temporal attributes added across {len(entity_results_list)} entities")
     
-    return {"entity_results": entity_results}
+    return TemporalAttributesBatchOutput(
+        entity_results=entity_results_list,
+        total_entities=len(entities),
+    )
 

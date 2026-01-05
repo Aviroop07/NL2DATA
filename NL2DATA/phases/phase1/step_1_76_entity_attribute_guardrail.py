@@ -13,13 +13,40 @@ Design:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
+from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.utils.observability import traceable_step
 from NL2DATA.utils.logging import get_logger
 
 
 logger = get_logger(__name__)
+
+
+class AttributeCandidateInfo(BaseModel):
+    name: str = Field(description="Name of the entity that was removed as attribute-like")
+    reason: str = Field(description="Reason why this entity was removed")
+    evidence: Optional[str] = Field(default=None, description="Evidence from the description that suggested this is an attribute")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntityAttributeGuardrailOutput(BaseModel):
+    """Output structure for entity attribute guardrail."""
+    entities: List = Field(
+        default_factory=list,
+        description="List of entities that passed the guardrail (kept as entities)"
+    )
+    removed_entity_names: List[str] = Field(
+        default_factory=list,
+        description="List of entity names that were removed as attribute-like"
+    )
+    attribute_candidates: List[AttributeCandidateInfo] = Field(
+        default_factory=list,
+        description="List of attribute candidate information for removed entities"
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _looks_like_attribute_name(name: str) -> bool:
@@ -74,7 +101,7 @@ def _evidence_suggests_derived_field(evidence: str) -> bool:
     return False
 
 
-def _should_remove_as_attribute(entity: Dict[str, Any]) -> Optional[str]:
+def _should_remove_as_attribute(entity) -> Optional[str]:
     """
     Return a reason string if the entity should be removed as attribute-like; otherwise None.
     Conservative: only remove when we have strong signals and it isn't explicitly mentioned.
@@ -111,10 +138,10 @@ def _should_remove_as_attribute(entity: Dict[str, Any]) -> Optional[str]:
 
 @traceable_step("1.76", phase=1, tags=["entity_attribute_guardrail"])
 async def step_1_76_entity_attribute_guardrail(
-    entities: List[Dict[str, Any]],
+    entities: List,
     nl_description: str,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> EntityAttributeGuardrailOutput:
     """
     Filter out attribute-like entities deterministically.
     """
@@ -122,30 +149,29 @@ async def step_1_76_entity_attribute_guardrail(
     _ = domain
 
     if not entities:
-        return {
-            "entities": [],
-            "removed_entity_names": [],
-            "attribute_candidates": [],
-        }
+        return EntityAttributeGuardrailOutput(
+            entities=[],
+            removed_entity_names=[],
+            attribute_candidates=[],
+        )
 
-    kept: List[Dict[str, Any]] = []
+    kept: List = []
     removed_names: List[str] = []
-    candidates: List[Dict[str, Any]] = []
+    candidates: List[AttributeCandidateInfo] = []
 
     for e in entities:
-        if not isinstance(e, dict):
-            continue
         reason = _should_remove_as_attribute(e)
         if reason:
-            name = (e.get("name") or "").strip()
+            name = (e.get("name") if isinstance(e, dict) else getattr(e, "name", "") or "").strip()
             if name:
                 removed_names.append(name)
+            evidence = (e.get("evidence") if isinstance(e, dict) else getattr(e, "evidence", None) or None)
             candidates.append(
-                {
-                    "name": name,
-                    "reason": reason,
-                    "evidence": (e.get("evidence") or None),
-                }
+                AttributeCandidateInfo(
+                    name=name,
+                    reason=reason,
+                    evidence=evidence,
+                )
             )
             continue
         kept.append(e)
@@ -153,10 +179,10 @@ async def step_1_76_entity_attribute_guardrail(
     if removed_names:
         logger.info(f"Step 1.76: Removed {len(removed_names)} attribute-like entities: {removed_names}")
 
-    return {
-        "entities": kept,
-        "removed_entity_names": removed_names,
-        "attribute_candidates": candidates,
-    }
+    return EntityAttributeGuardrailOutput(
+        entities=kept,
+        removed_entity_names=removed_names,
+        attribute_candidates=candidates,
+    )
 
 

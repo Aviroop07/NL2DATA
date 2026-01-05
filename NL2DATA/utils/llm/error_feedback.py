@@ -5,6 +5,7 @@ helping them learn from mistakes and improve output quality.
 """
 
 from typing import TypeVar, Type, Dict, Any, Optional, List
+from enum import Enum
 from pydantic import BaseModel, ValidationError
 from langchain_core.exceptions import OutputParserException
 import json
@@ -24,6 +25,19 @@ from NL2DATA.utils.llm.error_feedback_helpers import (
 logger = get_logger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class ErrorCategory(Enum):
+    """Categories for different types of errors in LLM output validation."""
+    
+    SCHEMA_VIOLATION = "schema_violation"  # Invalid entity/attribute names, missing required fields
+    DSL_SYNTAX_ERROR = "dsl_syntax_error"  # Invalid DSL expression syntax
+    VALIDATION_FAILURE = "validation_failure"  # Failed deterministic validation
+    PARSING_ERROR = "parsing_error"  # JSON/Pydantic parsing failed
+    TYPE_ERROR = "type_error"  # Type mismatch in field values
+    EMPTY_OUTPUT = "empty_output"  # None or empty output when output is expected
+    TOOL_CALL_ERROR = "tool_call_error"  # Tool call format or execution errors
+    UNKNOWN = "unknown"  # Unknown or unclassified error
 
 
 class NoneOutputError(ValueError):
@@ -120,6 +134,45 @@ Please correct your output based on the errors above."""
     return feedback
 
 
+def categorize_error(error: Exception) -> ErrorCategory:
+    """
+    Categorize an error into an ErrorCategory enum value.
+    
+    Args:
+        error: Exception that occurred
+        
+    Returns:
+        ErrorCategory enum value
+    """
+    if isinstance(error, NoneOutputError):
+        return ErrorCategory.EMPTY_OUTPUT
+    
+    if isinstance(error, ValidationError):
+        # Check error types to determine category
+        error_types = [err.get("type", "") for err in error.errors()]
+        if any("missing" in et for et in error_types):
+            return ErrorCategory.SCHEMA_VIOLATION
+        elif any("type_error" in et or "value_error.type" in et for et in error_types):
+            return ErrorCategory.TYPE_ERROR
+        else:
+            return ErrorCategory.VALIDATION_FAILURE
+    
+    if isinstance(error, OutputParserException):
+        return ErrorCategory.PARSING_ERROR
+    
+    if isinstance(error, NoneFieldError):
+        return ErrorCategory.SCHEMA_VIOLATION
+    
+    if isinstance(error, (ValueError, json.JSONDecodeError)):
+        error_msg = str(error).lower()
+        if "empty" in error_msg or "no output" in error_msg or "none" in error_msg:
+            return ErrorCategory.EMPTY_OUTPUT
+        elif "json" in error_msg or "parse" in error_msg:
+            return ErrorCategory.PARSING_ERROR
+    
+    return ErrorCategory.UNKNOWN
+
+
 def extract_error_details(
     error: Exception,
     output_schema: Optional[Type[T]],  # Make optional
@@ -134,9 +187,10 @@ def extract_error_details(
         raw_output: Optional raw output string from LLM
         
     Returns:
-        Dictionary with error details for feedback
+        Dictionary with error details for feedback, including error_category
     """
     details = {}
+    details["error_category"] = categorize_error(error)
     
     if isinstance(error, NoneOutputError):
         # Specific error for None/empty outputs
@@ -216,6 +270,8 @@ def create_error_feedback_message(
     attempt_number: int,
     raw_output: Optional[str] = None,
     tool_call_errors: Optional[List[Dict[str, Any]]] = None,
+    category: Optional[ErrorCategory] = None,
+    suggestions: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Create error feedback message for LLM retry.
@@ -228,18 +284,35 @@ def create_error_feedback_message(
         output_schema: Optional Pydantic model class for expected output (None if unavailable)
         attempt_number: Current retry attempt number
         raw_output: Optional raw output string from LLM
+        tool_call_errors: Optional list of tool call errors
+        category: Optional ErrorCategory enum value (auto-detected if not provided)
+        suggestions: Optional dictionary with suggestions for fixing the error
         
     Returns:
         Formatted error feedback string
     """
     try:
+        error_details = extract_error_details(error, output_schema, raw_output)
+        
+        # Use provided category or get from error_details
+        error_category = category or error_details.get("error_category", ErrorCategory.UNKNOWN)
+        
+        # Check for tool call errors to set category
+        if tool_call_errors and not category:
+            error_category = ErrorCategory.TOOL_CALL_ERROR
+        
         error_info = {
             "error_type": type(error).__name__,
             "error_message": str(error),
-            "error_details": extract_error_details(error, output_schema, raw_output),
+            "error_details": error_details,
         }
         
-        return format_error_feedback(error_info, output_schema, attempt_number, tool_call_errors)
+        return format_error_feedback(
+            error_info, 
+            output_schema, 
+            attempt_number, 
+            tool_call_errors
+        )
     except Exception as e:
         # Fallback: if error feedback creation fails, provide basic feedback
         logger.warning(f"Failed to create detailed error feedback: {e}. Using fallback feedback.")

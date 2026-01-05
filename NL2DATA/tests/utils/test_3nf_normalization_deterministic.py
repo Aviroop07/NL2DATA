@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from NL2DATA.phases.phase4.step_4_2_3nf_normalization import step_4_2_3nf_normalization
+from NL2DATA.phases.phase11.step_11_2_3nf_normalization import step_11_2_3nf_normalization
 
 
 def _table(schema: dict, name: str) -> dict:
@@ -120,7 +120,7 @@ def test_3nf_normalization_deterministic() -> None:
         print(f"    {i}. {', '.join(fd['lhs'])} -> {', '.join(fd['rhs'])}")
     
     print("\n[STEP 3] Running 3NF normalization...")
-    normalized = step_4_2_3nf_normalization(
+    normalized = step_11_2_3nf_normalization(
         relational_schema=relational_schema,
         functional_dependencies=functional_dependencies,
         entity_unique_constraints=None,

@@ -8,7 +8,24 @@ import type {
   SaveChangesResponse,
   DistributionMetadataResponse,
   ToyDataGenerationRequest,
-  CSVGenerationRequest
+  CSVGenerationRequest,
+  CheckpointResponse,
+  CheckpointProceedRequest,
+  CheckpointProceedResponse,
+  DomainEditRequest,
+  EntitiesEditRequest,
+  RelationsEditRequest,
+  AttributesEditRequest,
+  PrimaryKeysEditRequest,
+  MultivaluedDerivedEditRequest,
+  NullabilityEditRequest,
+  ERDiagramEditRequest,
+  DatatypesEditRequest,
+  RelationalSchemaEditRequest,
+  InformationMiningEditRequest,
+  FunctionalDependenciesEditRequest,
+  ConstraintsEditRequest,
+  GenerationStrategiesEditRequest
 } from '../types/api';
 import { API_BASE_URL } from '../utils/constants';
 
@@ -55,6 +72,87 @@ export const apiService = {
   
   async generateCSV(request: CSVGenerationRequest): Promise<{ job_id: string; status: string }> {
     const response = await apiClient.post<{ job_id: string; status: string }>('/api/generate/csv', request);
+    return response.data;
+  },
+  
+  // Checkpoint endpoints
+  async getCheckpoint(jobId: string): Promise<CheckpointResponse> {
+    const response = await apiClient.get<CheckpointResponse>(`/api/checkpoint/${jobId}`);
+    return response.data;
+  },
+  
+  async proceedToNextCheckpoint(request: CheckpointProceedRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/proceed', request);
+    return response.data;
+  },
+  
+  async saveDomainEdit(request: DomainEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/domain/save', request);
+    return response.data;
+  },
+  
+  async saveEntitiesEdit(request: EntitiesEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/entities/save', request);
+    return response.data;
+  },
+  
+  async saveRelationsEdit(request: RelationsEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/relations/save', request);
+    return response.data;
+  },
+  
+  async saveAttributesEdit(request: AttributesEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/attributes/save', request);
+    return response.data;
+  },
+  
+  async savePrimaryKeysEdit(request: PrimaryKeysEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/primary_keys/save', request);
+    return response.data;
+  },
+  
+  async saveERDiagramEdit(request: ERDiagramEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/er_diagram/save', request);
+    return response.data;
+  },
+  
+  async saveDatatypesEdit(request: DatatypesEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/datatypes/save', request);
+    return response.data;
+  },
+  
+  async saveMultivaluedDerivedEdit(request: MultivaluedDerivedEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/multivalued_derived/save', request);
+    return response.data;
+  },
+  
+  async saveNullabilityEdit(request: NullabilityEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/nullability/save', request);
+    return response.data;
+  },
+  
+  async saveRelationalSchemaEdit(request: RelationalSchemaEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/relational_schema/save', request);
+    return response.data;
+  },
+  
+  async saveInformationMiningEdit(request: InformationMiningEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/information_mining/save', request);
+    return response.data;
+  },
+  
+  async saveFunctionalDependenciesEdit(request: FunctionalDependenciesEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/functional_dependencies/save', request);
+    return response.data;
+  },
+  
+  async saveConstraintsEdit(request: ConstraintsEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/constraints/save', request);
+    return response.data;
+  },
+  
+  async saveGenerationStrategiesEdit(request: GenerationStrategiesEditRequest): Promise<CheckpointProceedResponse> {
+    const response = await apiClient.post<CheckpointProceedResponse>('/api/checkpoint/generation_strategies/save', request);
     return response.data;
   }
 };

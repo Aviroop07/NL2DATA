@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from NL2DATA.phases.phase7.strategies.distributions import (
+from NL2DATA.phases.phase9.strategies.distributions import (
     NormalDistribution,
     LognormalDistribution,
     UniformDistribution,
@@ -17,7 +17,7 @@ from NL2DATA.phases.phase7.strategies.distributions import (
     CategoricalDistribution,
     BernoulliDistribution,
 )
-from NL2DATA.phases.phase7.strategies.faker_strategies import (
+from NL2DATA.phases.phase9.strategies.faker_strategies import (
     FakerNameStrategy,
     FakerEmailStrategy,
     FakerAddressStrategy,
@@ -26,7 +26,7 @@ from NL2DATA.phases.phase7.strategies.faker_strategies import (
     FakerURLStrategy,
     FakerPhoneStrategy,
 )
-from NL2DATA.phases.phase7.strategies.mimesis_strategies import (
+from NL2DATA.phases.phase9.strategies.mimesis_strategies import (
     MimesisNameStrategy,
     MimesisEmailStrategy,
     MimesisTextStrategy,
@@ -34,7 +34,7 @@ from NL2DATA.phases.phase7.strategies.mimesis_strategies import (
     MimesisCoordinatesStrategy,
     MimesisCountryStrategy,
 )
-from NL2DATA.phases.phase7.strategies.regex_strategy import RegexStrategy
+from NL2DATA.phases.phase9.strategies.regex_strategy import RegexStrategy
 from pydantic import ValidationError
 
 

@@ -3,7 +3,7 @@
 Suggests supporting entities needed for realism and schema completeness.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Literal
 
@@ -12,6 +12,7 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.utils.tools.validation_tools import _check_entity_name_validity_impl, _verify_entity_in_known_entities_impl
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -39,9 +40,9 @@ class AuxiliaryEntityOutput(BaseModel):
 @traceable_step("1.6", phase=1, tags=["auxiliary_entity_suggestion"])
 async def step_1_6_auxiliary_entity_suggestion(
     nl_description: str,
-    key_entities: Optional[List[Dict[str, Any]]] = None,
+    key_entities: Optional[List] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> AuxiliaryEntityOutput:
     """
     Step 1.6: Suggest supporting entities needed for realism.
     
@@ -81,6 +82,17 @@ async def step_1_6_auxiliary_entity_suggestion(
             if n:
                 key_names.append(n)
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=AuxiliaryEntityOutput,
+        additional_requirements=[
+            "Naming rules: name must be singular, SQL-safe, PascalCase - keep names specific (do not over-generalize)",
+            "Grounding rule: trigger MUST be a verbatim phrase (<=20 words) copied from the description",
+            "Do NOT suggest entities already in KeyEntitiesAlreadyIdentified (verify with tool)",
+            "Do NOT suggest junction/bridge tables or attributes/metrics - only entities that merit their own table"
+        ]
+    )
+    
     # System prompt
     system_prompt = """You are a database design assistant.
 
@@ -106,39 +118,19 @@ Assign priority:
 - should_have: strongly improves realism/normalization for stated requirements
 - nice_to_have: optional improvements; include only if clearly beneficial
 
-Output (JSON only; no extra keys)
-{
-  "suggested_entities": [
-    {
-      "name": string,
-      "description": string,
-      "reasoning": string,
-      "motivation": "completeness" | "realism" | "normalization",
-      "priority": "must_have" | "should_have" | "nice_to_have",
-      "trigger": string
-    }
-  ]
-}
+""" + output_structure_section + """
 
-Naming rules
-- name must be singular, SQL-safe, PascalCase.
-- Keep names specific (do not over-generalize).
-
-Tool usage (mandatory)
+Tool usage (mandatory):
 You have access to two tools:
 1) check_entity_name_validity(name: str) -> {valid: bool, error: str|null, suggestion: str|null}
 2) verify_entity_in_known_entities(entity: str, known_entities: List[str]) -> {exists: bool, error: str|null}
 
 Before finalizing your response:
 1) For EACH suggested entity:
-   a) Call check_entity_name_validity with:
-      {"name": "<entity.name>"}
-   b) If valid=false, fix the name (use suggestion if present) and re-check.
-   c) Call verify_entity_in_known_entities to ensure it's NOT already in KeyEntitiesAlreadyIdentified:
-      {"entity": "<entity.name>", "known_entities": [<KeyEntitiesAlreadyIdentified_list>]}
-   d) If exists=true, REMOVE this entity from suggestions (it's a duplicate).
-
-Return JSON only. No markdown. No extra text."""
+   a) Call check_entity_name_validity with: {"name": "<entity.name>"}
+   b) If valid=false, fix the name (use suggestion if present) and re-check
+   c) Call verify_entity_in_known_entities to ensure it's NOT already in KeyEntitiesAlreadyIdentified
+   d) If exists=true, REMOVE this entity from suggestions (it's a duplicate)"""
     
     # Human prompt template
     human_prompt = """Natural language description:
@@ -220,8 +212,7 @@ KeyEntitiesAlreadyIdentified: {key_entities}
             entity_names = [e.name for e in result.suggested_entities]
             logger.info(f"Suggested auxiliary entities: {', '.join(entity_names)}")
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error in auxiliary entity suggestion: {e}", exc_info=True)

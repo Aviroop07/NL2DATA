@@ -40,9 +40,8 @@ def get_llm_model(
     tokens = max_tokens or openai_config.get("max_tokens", 4000)
     req_timeout = timeout or openai_config.get("timeout", 60)
     
-    logger.info(
-        f"Initializing LLM model: {model} (temperature={temp}, max_tokens={tokens}, timeout={req_timeout})"
-    )
+    # Note: Logging is handled by base_router.py to avoid duplicates
+    # Only log here if this function is called directly (not via base_router)
     
     return ChatOpenAI(
         model=model,

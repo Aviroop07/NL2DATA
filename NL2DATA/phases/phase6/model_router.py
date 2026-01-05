@@ -1,51 +1,25 @@
-"""Phase 6 model router for step-specific model selection.
+"""Model router for Phase 6 (DDL Generation & Schema Creation)."""
 
-This module provides model selection for Phase 6 steps, mapping each step
-to the appropriate task type and model.
-"""
+from NL2DATA.utils.llm.base_router import get_model_for_task
 
-from typing import Optional
-from langchain_openai import ChatOpenAI
-
-from NL2DATA.utils.llm.base_router import get_model_for_task, TaskType
-from NL2DATA.utils.logging import get_logger
-
-logger = get_logger(__name__)
-
-# Phase 6 step to task type mapping
-PHASE6_STEP_MAPPING: dict[str, TaskType] = {
-    "6.1": "important",  # Constraint Detection - important, with loop support
-    "6.2": "high_fanout",  # Constraint Scope Analysis - per-constraint, high fanout
-    "6.3": "high_fanout",  # Constraint Enforcement Strategy - per-constraint, high fanout
-    # 6.4, 6.5 are deterministic (no LLM)
+# Phase 6 step mappings
+STEP_TO_TASK_TYPE = {
+    "6.1": "simple",      # DDL Compilation (deterministic)
+    "6.2": "simple",      # DDL Validation (deterministic)
+    "6.3": "important",   # DDL Error Correction (important for schema quality)
+    "6.4": "simple",      # Schema Creation (deterministic)
+    "6.5": "important",   # SQL Query Generation (important for query quality)
 }
 
 
-def get_model_for_step(
-    step_id: str,
-    model_name: Optional[str] = None,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-    timeout: Optional[int] = None,
-) -> ChatOpenAI:
-    """Get model for a specific Phase 6 step.
+def get_model_for_step(step_number: str):
+    """Get LLM model for a Phase 6 step.
     
     Args:
-        step_id: Step identifier (e.g., "6.1", "6.2", "6.3")
-        model_name: Optional override model name
-        temperature: Optional override temperature
-        max_tokens: Optional override max tokens
-        timeout: Optional override timeout
+        step_number: Step number (e.g., "6.1", "6.2", "6.3", "6.4", "6.5")
         
     Returns:
-        ChatOpenAI model instance configured for the step
+        LLM model instance
     """
-    task_type = PHASE6_STEP_MAPPING.get(step_id, "default")
-    return get_model_for_task(
-        task_type=task_type,
-        model_name=model_name,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-
+    task_type = STEP_TO_TASK_TYPE.get(step_number, "simple")
+    return get_model_for_task(task_type=task_type)

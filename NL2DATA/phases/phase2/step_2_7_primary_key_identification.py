@@ -4,7 +4,7 @@ Determines which attribute(s) uniquely identify each entity.
 Critical for table design - every table needs a primary key.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from NL2DATA.phases.phase2.model_router import get_model_for_step
@@ -12,6 +12,7 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.utils.pipeline_config import get_phase2_config
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -78,7 +79,7 @@ async def step_2_7_primary_key_identification(
     nl_description: Optional[str] = None,
     entity_description: Optional[str] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> PrimaryKeyOutput:
     """
     Step 2.7 (per-entity): Determine which attribute(s) uniquely identify the entity.
     
@@ -109,11 +110,11 @@ async def step_2_7_primary_key_identification(
     # Validate that attributes exist
     if not attributes:
         logger.warning(f"No attributes provided for entity {entity_name}, cannot identify primary key")
-        return {
-            "primary_key": [],
-            "reasoning": "No attributes available to form primary key",
-            "alternative_keys": []
-        }
+        return PrimaryKeyOutput(
+            primary_key=[],
+            reasoning="No attributes available to form primary key",
+            alternative_keys=[]
+        )
     
     # Build context
     context_parts = []
@@ -128,6 +129,16 @@ async def step_2_7_primary_key_identification(
     )
     
     context_msg = "\n\nContext:\n" + "\n".join(f"- {part}" for part in context_parts)
+    
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=PrimaryKeyOutput,
+        additional_requirements=[
+            "primary_key must be a list (can be empty), reasoning cannot be empty",
+            "CRITICAL CONSTRAINT: You MUST only use attribute names from the provided attribute list. DO NOT invent or suggest attribute names that are not in the list",
+            "If no suitable stable natural key exists, choose the surrogate key name provided in context"
+        ]
+    )
     
     # System prompt
     system_prompt = """You are a database schema design expert. Your task is to identify the primary key for an entity.
@@ -147,10 +158,26 @@ A primary key is a set of attributes that uniquely identifies each instance of t
 
 **AVAILABLE ATTRIBUTES**: You can ONLY use attribute names from the provided attribute list OR the explicitly allowed surrogate key name provided in context. Do NOT invent other new attribute names.
 
-Return a JSON object with:
-- primary_key: List of attribute names that form the primary key (MUST be from the provided attribute list)
-- reasoning: REQUIRED - Clear explanation of why these attributes form the primary key (cannot be omitted)
-- alternative_keys: Any alternative candidate keys (optional, also must be from the provided attribute list)"""
+CRITICAL: SCHEMA ANCHORED VALIDATION
+Before outputting any attribute name in primary_key:
+1. Check if it exists in the provided attribute list
+2. Use EXACT names from the attribute list (case-sensitive)
+3. Do NOT invent new attribute names - only use attributes from the provided list
+
+EXAMPLES:
+❌ BAD: primary_key: ["customerId"] when attribute list has ["customer_id"]
+❌ BAD: primary_key: ["id"] when attribute list has ["customer_id", "order_id"] (ambiguous)
+✅ GOOD: Using exact names from attribute list: ["customer_id"], ["order_id", "item_id"]
+
+COMMON MISTAKES TO AVOID:
+1. ❌ Using non-existent attribute names (check attribute list first)
+2. ❌ Mixing attribute names (e.g., "customerId" vs "customer_id")
+3. ❌ Using ambiguous names like "id" when multiple ID attributes exist
+4. ❌ Suggesting composite keys with attributes that don't exist
+
+If unsure, err on the side of conservatism (use exact names from attribute list, or surrogate key).
+
+""" + output_structure_section
     
     # Human prompt
     human_prompt_template = """Identify the primary key for the entity: {entity_name}
@@ -253,20 +280,38 @@ Return a JSON object with the primary key attributes, reasoning, and any alterna
         
         logger.debug(f"Entity {entity_name}: Primary key identified as {result.primary_key}")
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error identifying primary key for entity {entity_name}: {e}", exc_info=True)
         raise
 
 
+class EntityPrimaryKeyResult(BaseModel):
+    """Result for a single entity in batch processing."""
+    entity_name: str = Field(description="Name of the entity")
+    primary_key: List[str] = Field(description="List of attribute names that form the primary key")
+    reasoning: str = Field(description="Explanation of why these attributes form the primary key")
+    alternative_keys: List[List[str]] = Field(
+        default_factory=list,
+        description="Alternative candidate keys (if any)"
+    )
+
+
+class PrimaryKeyBatchOutput(BaseModel):
+    """Output structure for Step 2.7 batch processing."""
+    entity_results: List[EntityPrimaryKeyResult] = Field(
+        description="List of primary key identification results, one per entity"
+    )
+    total_entities: int = Field(description="Total number of entities processed")
+
+
 async def step_2_7_primary_key_identification_batch(
-    entities: List[Dict[str, Any]],
-    entity_attributes: Dict[str, List[str]],  # entity_name -> final attribute list (from Step 2.3)
+    entities: List,
+    entity_attributes: dict,  # entity_name -> final attribute list (from Step 2.3)
     nl_description: Optional[str] = None,
     domain: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> PrimaryKeyBatchOutput:
     """
     Step 2.7: Identify primary keys for all entities (parallel execution).
     
@@ -277,21 +322,21 @@ async def step_2_7_primary_key_identification_batch(
         domain: Optional domain context from Phase 1
         
     Returns:
-        dict: Primary key identification results for all entities, keyed by entity name
+        PrimaryKeyBatchOutput: Primary key identification results for all entities
         
     Example:
         >>> result = await step_2_7_primary_key_identification_batch(
         ...     entities=[{"name": "Customer"}],
         ...     entity_attributes={"Customer": ["customer_id", "name", "email"]}
         ... )
-        >>> "Customer" in result["entity_results"]
-        True
+        >>> len(result.entity_results)
+        1
     """
     logger.info(f"Starting Step 2.7: Primary Key Identification for {len(entities)} entities")
     
     if not entities:
         logger.warning("No entities provided for primary key identification")
-        return {"entity_results": {}}
+        return PrimaryKeyBatchOutput(entity_results=[], total_entities=0)
     
     # Execute in parallel for all entities
     import asyncio
@@ -318,20 +363,33 @@ async def step_2_7_primary_key_identification_batch(
     )
     
     # Process results
-    entity_results = {}
-    for i, ((entity_name, _), result) in enumerate(zip(tasks, results)):
+    entity_results_list = []
+    for (entity_name, _), result in zip(tasks, results):
         if isinstance(result, Exception):
             logger.error(f"Error processing entity {entity_name}: {result}")
-            entity_results[entity_name] = {
-                "primary_key": [],
-                "reasoning": f"Error during analysis: {str(result)}",
-                "alternative_keys": []
-            }
+            entity_results_list.append(
+                EntityPrimaryKeyResult(
+                    entity_name=entity_name,
+                    primary_key=[],
+                    reasoning=f"Error during analysis: {str(result)}",
+                    alternative_keys=[]
+                )
+            )
         else:
-            entity_results[entity_name] = result
+            entity_results_list.append(
+                EntityPrimaryKeyResult(
+                    entity_name=entity_name,
+                    primary_key=result.primary_key,
+                    reasoning=result.reasoning,
+                    alternative_keys=result.alternative_keys,
+                )
+            )
     
-    total_with_pk = sum(1 for r in entity_results.values() if r.get("primary_key"))
-    logger.info(f"Primary key identification completed: {total_with_pk}/{len(entity_results)} entities have primary keys")
+    total_with_pk = sum(1 for r in entity_results_list if r.primary_key)
+    logger.info(f"Primary key identification completed: {total_with_pk}/{len(entity_results_list)} entities have primary keys")
     
-    return {"entity_results": entity_results}
+    return PrimaryKeyBatchOutput(
+        entity_results=entity_results_list,
+        total_entities=len(entities),
+    )
 

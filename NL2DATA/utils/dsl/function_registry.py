@@ -90,11 +90,31 @@ def get_function_registry() -> Dict[str, DSLFunctionSpec]:
         DSLFunctionSpec("DATE_TRUNC", "DATE_TRUNC(unit, ts)", (2, 2)),
         DSLFunctionSpec("EXTRACT", "EXTRACT(part, ts)", (2, 2)),
         # Aggregates (query-level metrics)
-        DSLFunctionSpec("COUNT", "COUNT(x)", (1, 1)),
-        DSLFunctionSpec("SUM", "SUM(x)", (1, 1)),
-        DSLFunctionSpec("AVG", "AVG(x)", (1, 1)),
+        DSLFunctionSpec("COUNT", "COUNT([DISTINCT] x)", (1, 1), description="Count with optional DISTINCT"),
+        DSLFunctionSpec("SUM", "SUM([DISTINCT] x)", (1, 1), description="Sum with optional DISTINCT"),
+        DSLFunctionSpec("AVG", "AVG([DISTINCT] x)", (1, 1), description="Average with optional DISTINCT"),
         DSLFunctionSpec("MIN", "MIN(x)", (1, 1)),
         DSLFunctionSpec("MAX", "MAX(x)", (1, 1)),
+        # Window functions (SQL-like)
+        DSLFunctionSpec("ROW_NUMBER", "ROW_NUMBER() OVER (window_spec)", (0, 0), description="Window function: row number"),
+        DSLFunctionSpec("RANK", "RANK() OVER (window_spec)", (0, 0), description="Window function: rank"),
+        DSLFunctionSpec("DENSE_RANK", "DENSE_RANK() OVER (window_spec)", (0, 0), description="Window function: dense rank"),
+        DSLFunctionSpec("PERCENT_RANK", "PERCENT_RANK() OVER (window_spec)", (0, 0), description="Window function: percent rank"),
+        DSLFunctionSpec("CUME_DIST", "CUME_DIST() OVER (window_spec)", (0, 0), description="Window function: cumulative distribution"),
+        DSLFunctionSpec("LAG", "LAG(expr, [offset], [default]) OVER (window_spec)", (1, 3), description="Window function: lag"),
+        DSLFunctionSpec("LEAD", "LEAD(expr, [offset], [default]) OVER (window_spec)", (1, 3), description="Window function: lead"),
+        DSLFunctionSpec("FIRST_VALUE", "FIRST_VALUE(expr) OVER (window_spec)", (1, 1), description="Window function: first value"),
+        DSLFunctionSpec("LAST_VALUE", "LAST_VALUE(expr) OVER (window_spec)", (1, 1), description="Window function: last value"),
+        DSLFunctionSpec("NTH_VALUE", "NTH_VALUE(expr, n) OVER (window_spec)", (2, 2), description="Window function: nth value"),
+        # Relational constraint functions (profile:v1+relational_constraints)
+        DSLFunctionSpec("IN_RANGE", "IN_RANGE(x, lo, hi)", (3, 3), description="Inclusive range check: lo <= x <= hi", feature="relational_constraints"),
+        DSLFunctionSpec("EXISTS", "EXISTS(table_name WHERE predicate)", (2, 2), description="Check if any row in table satisfies predicate", feature="relational_constraints"),
+        DSLFunctionSpec("LOOKUP", "LOOKUP(table_name, value_expr WHERE predicate)", (3, 3), description="Fetch single value from related table", feature="relational_constraints"),
+        DSLFunctionSpec("COUNT_WHERE", "COUNT_WHERE(table_name WHERE predicate)", (2, 2), description="Count rows in table satisfying predicate", feature="relational_constraints"),
+        DSLFunctionSpec("SUM_WHERE", "SUM_WHERE(table_name, value_expr WHERE predicate)", (3, 3), description="Sum value_expr over rows satisfying predicate", feature="relational_constraints"),
+        DSLFunctionSpec("AVG_WHERE", "AVG_WHERE(table_name, value_expr WHERE predicate)", (3, 3), description="Average value_expr over rows satisfying predicate", feature="relational_constraints"),
+        DSLFunctionSpec("MIN_WHERE", "MIN_WHERE(table_name, value_expr WHERE predicate)", (3, 3), description="Minimum value_expr over rows satisfying predicate", feature="relational_constraints"),
+        DSLFunctionSpec("MAX_WHERE", "MAX_WHERE(table_name, value_expr WHERE predicate)", (3, 3), description="Maximum value_expr over rows satisfying predicate", feature="relational_constraints"),
     ]
 
     # Merge in distributions as functions too

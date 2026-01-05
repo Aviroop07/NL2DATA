@@ -3,13 +3,14 @@
 Ensures all entities are connected through relations (no orphan entities).
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.phases.phase1.utils import (
     extract_entity_name,
     build_entity_list_string,
@@ -21,15 +22,22 @@ from NL2DATA.ir.models.relation_type import RelationType, normalize_relation_typ
 logger = get_logger(__name__)
 
 
+class ConnectivityStatusEntry(BaseModel):
+    entity_name: str = Field(description="Name of the entity")
+    is_connected: bool = Field(description="Whether the entity is connected (True) or orphan (False)")
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ConnectivityValidationOutput(BaseModel):
     """Output structure for connectivity validation."""
     orphan_entities: List[str] = Field(
         default_factory=list,
         description="List of entity names that are not connected to any other entities"
     )
-    connectivity_status: Optional[Dict[str, bool]] = Field(
-        default_factory=dict,
-        description="Dictionary mapping entity names to their connectivity status (True = connected, False = orphan)"
+    connectivity_status: List[ConnectivityStatusEntry] = Field(
+        default_factory=list,
+        description="List of connectivity status entries, one per entity"
     )
     suggested_relations: List[str] = Field(
         default_factory=list,
@@ -49,13 +57,13 @@ class ConnectivityValidationOutput(BaseModel):
 
 @traceable_step("1.10", phase=1, tags=["schema_connectivity"])
 async def step_1_10_schema_connectivity(
-    entities: List[Dict[str, Any]],
-    relations: List[Dict[str, Any]],
+    entities: List,
+    relations: List,
     nl_description: Optional[str] = None,
-    previous_result: Optional[Dict[str, Any]] = None,
+    previous_result: Optional = None,
     domain: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> ConnectivityValidationOutput:
     """
     Step 1.10: Ensure all entities are connected through relations.
     
@@ -95,13 +103,16 @@ async def step_1_10_schema_connectivity(
 
     # Deterministic baseline connectivity (do not rely on LLM for orphan detection)
     entity_names: List[str] = [extract_entity_name(e) for e in entities]
-    baseline_connectivity_status: Dict[str, bool] = {}
+    baseline_connectivity_status: List[ConnectivityStatusEntry] = []
     baseline_orphan_entities: List[str] = []
 
     for entity_name in entity_names:
         conn = _check_entity_connectivity_impl(entity_name, relations)
         is_connected = bool(conn.get("is_connected", False))
-        baseline_connectivity_status[entity_name] = is_connected
+        baseline_connectivity_status.append(ConnectivityStatusEntry(
+            entity_name=entity_name,
+            is_connected=is_connected
+        ))
         if not is_connected:
             baseline_orphan_entities.append(entity_name)
 
@@ -110,6 +121,15 @@ async def step_1_10_schema_connectivity(
         f"Orphans: {baseline_orphan_entities}"
         if baseline_orphan_entities
         else "Deterministic connectivity check: all entities are connected (no orphans found)."
+    )
+    
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=ConnectivityValidationOutput,
+        additional_requirements=[
+            "Reasoning is REQUIRED and cannot be omitted",
+            "After using any tools, you MUST return your final response in the required JSON format. Do NOT return tool calls as your final answer"
+        ]
     )
     
     # System prompt
@@ -137,13 +157,7 @@ Important:
 
 You have access to a validation tool: check_entity_connectivity. You may use this tool to check if entities are connected through relations, but you MUST still return your final answer as structured JSON.
 
-CRITICAL: After using any tools, you MUST return your final response in the required JSON format. Do NOT return tool calls as your final answer.
-
-Provide your response as a JSON object with:
-- orphan_entities: List of entity names that are orphans (empty array if none)
-- connectivity_status: Dictionary mapping each entity name to true (connected) or false (orphan)
-- suggested_relations: List of suggested relationship descriptions to connect orphans (empty array if none)
-- reasoning: REQUIRED - Clear explanation of your analysis and recommendations (cannot be omitted)"""
+""" + output_structure_section
     
     # Human prompt template
     human_prompt = f"""Entities in the schema:
@@ -191,38 +205,36 @@ Original description (if available):
         else:
             logger.info("All entities are connected - schema connectivity is good")
         
-        # Convert to dict and add iteration info for loop tracking
-        result_dict = result.model_dump()
-        result_dict["orphan_entities"] = baseline_orphan_entities
-        result_dict["connectivity_status"] = baseline_connectivity_status
-        if not (result_dict.get("reasoning") or "").strip():
-            result_dict["reasoning"] = baseline_reasoning
-        result_dict["iteration"] = iteration_num
-        result_dict["needs_loop"] = orphan_count > 0
+        # Update result with deterministic connectivity data
+        result = result.model_copy(update={
+            "orphan_entities": baseline_orphan_entities,
+            "connectivity_status": baseline_connectivity_status,
+            "reasoning": result.reasoning or baseline_reasoning
+        })
         
-        return result_dict
+        # For compatibility with loop tracking, we need to add iteration info
+        # But we return the Pydantic model, so we'll handle this in the wrapper
+        return result
         
     except Exception as e:
         # Do not abort the pipeline on LLM/tooling errors: return deterministic connectivity results.
         logger.error(f"Error in schema connectivity validation: {e}", exc_info=True)
 
-        return {
-            "orphan_entities": baseline_orphan_entities,
-            "connectivity_status": baseline_connectivity_status,
-            "suggested_relations": [],
-            "reasoning": baseline_reasoning,
-            "iteration": iteration_num,
-            "needs_loop": len(baseline_orphan_entities) > 0,
-        }
+        return ConnectivityValidationOutput(
+            orphan_entities=baseline_orphan_entities,
+            connectivity_status=baseline_connectivity_status,
+            suggested_relations=[],
+            reasoning=baseline_reasoning
+        )
 
 
 async def step_1_10_schema_connectivity_with_loop(
-    entities: List[Dict[str, Any]],
-    relations: List[Dict[str, Any]],
+    entities: List,
+    relations: List,
     nl_description: Optional[str] = None,
     max_iterations: int = 3,
     max_time_sec: int = 180,
-) -> Dict[str, Any]:
+):
     """
     Step 1.10 with automatic looping: loops back to relation extraction if orphans found.
     
@@ -374,7 +386,7 @@ async def step_1_10_schema_connectivity_with_loop(
         # If orphans found, actively try to enrich the ER graph for the next iteration.
         # 1) Prefer looping back to Step 1.9 (key relations extraction) with orphan guidance.
         # 2) Also accept Step 1.10 textual suggestions as a secondary source.
-        orphan_entities = result.get("orphan_entities") or []
+        orphan_entities = result.orphan_entities if hasattr(result, 'orphan_entities') else (result.get("orphan_entities") if isinstance(result, dict) else [])
         if orphan_entities:
             try:
                 from NL2DATA.phases.phase1.step_1_9_key_relations_extraction import (
@@ -388,7 +400,12 @@ async def step_1_10_schema_connectivity_with_loop(
                     mentioned_relations=None,
                     focus_entities=orphan_entities,
                 )
-                candidate_relations = relation_result.get("relations", []) if isinstance(relation_result, dict) else []
+                if isinstance(relation_result, dict):
+                    candidate_relations = relation_result.get("relations", [])
+                elif hasattr(relation_result, 'relations'):
+                    candidate_relations = relation_result.relations
+                else:
+                    candidate_relations = []
             except Exception as e:
                 logger.warning(
                     f"Step 1.10 loop: failed to re-run Step 1.9 for orphan entities. error={e}",
@@ -397,7 +414,7 @@ async def step_1_10_schema_connectivity_with_loop(
                 candidate_relations = []
 
             # Secondary source: Step 1.10's own suggested_relations (string descriptions)
-            suggested = result.get("suggested_relations") or []
+            suggested = result.suggested_relations if hasattr(result, 'suggested_relations') else (result.get("suggested_relations") if isinstance(result, dict) else [])
             parsed = _parse_suggested_relations(suggested, entities) if suggested else []
             candidate_relations.extend(parsed)
 
@@ -433,9 +450,14 @@ async def step_1_10_schema_connectivity_with_loop(
         
         return result
     
-    def should_terminate(result: Dict[str, Any]) -> bool:
+    def should_terminate(result) -> bool:
         """Check if loop should terminate (no orphans found)."""
-        orphan_count = len(result.get("orphan_entities", []))
+        if isinstance(result, dict):
+            orphan_count = len(result.get("orphan_entities", []))
+        elif hasattr(result, 'orphan_entities'):
+            orphan_count = len(result.orphan_entities)
+        else:
+            orphan_count = 0
         return orphan_count == 0
     
     # Run loop
@@ -456,9 +478,10 @@ async def step_1_10_schema_connectivity_with_loop(
     final_result = loop_result["result"]
     
     # If orphans still exist after loop, log warning
-    if final_result.get("needs_loop", False):
+    orphan_count = len(final_result.orphan_entities if hasattr(final_result, 'orphan_entities') else (final_result.get('orphan_entities', []) if isinstance(final_result, dict) else []))
+    if orphan_count > 0:
         logger.warning(
-            f"Schema connectivity validation completed with {len(final_result.get('orphan_entities', []))} "
+            f"Schema connectivity validation completed with {orphan_count} "
             f"orphan entities after {loop_result['iterations']} iterations. "
             f"Consider manual review or additional relation extraction."
         )
@@ -468,7 +491,7 @@ async def step_1_10_schema_connectivity_with_loop(
         )
     
     return {
-        "final_result": final_result,
+        "final_result": final_result.model_dump() if hasattr(final_result, 'model_dump') else final_result,
         "updated_relations": current_relations,
         "loop_metadata": {
             "iterations": loop_result["iterations"],

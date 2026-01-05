@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from NL2DATA.phases.phase1 import (
     step_1_1_domain_detection,
     step_1_2_entity_mention_detection,
-    step_1_3_domain_inference,
     step_1_4_key_entity_extraction,
     step_1_5_relation_mention_detection,
     step_1_6_auxiliary_entity_suggestion,
@@ -67,17 +66,7 @@ async def test_phase1_complete():
         mentioned = result_1_2.get("mentioned_entities", [])
         print(f"[PASS] Step 1.2 completed: has_explicit_entities={has_explicit}, mentioned={len(mentioned)} entities")
         
-        # Step 1.3: Domain Inference (if needed)
-        print("\n" + "-" * 80)
-        print("Step 1.3: Domain Inference")
-        print("-" * 80)
-        if not has_domain:
-            result_1_3 = await step_1_3_domain_inference(nl_description, result_1_1)
-            inferred_domain = result_1_3.get("domain")
-            print(f"[PASS] Step 1.3 completed: inferred_domain={inferred_domain}")
-            domain = inferred_domain
-        else:
-            print(f"[SKIP] Step 1.3 skipped (domain already detected)")
+        # Step 1.3 was merged into Step 1.1 per the new pipeline plan.
         
         # Step 1.4: Key Entity Extraction
         print("\n" + "-" * 80)

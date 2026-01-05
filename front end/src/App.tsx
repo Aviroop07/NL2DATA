@@ -1,14 +1,10 @@
 import React from 'react';
 import { Box } from '@mui/material';
 import Layout from './components/layout/Layout';
-import { useWebSocket } from './hooks/useWebSocket';
-import { useAppStore } from './stores/useAppStore';
 
 const App: React.FC = () => {
-  const { jobId } = useAppStore();
-  
-  // Establish WebSocket connection when jobId is available
-  useWebSocket(jobId);
+  // WebSocket removed - pipeline works via HTTP requests/responses only
+  // WebSocket is only used for NL description suggestions (handled separately)
   
   return (
     <Box sx={{ height: '100vh', width: '100vw', overflow: 'hidden' }}>

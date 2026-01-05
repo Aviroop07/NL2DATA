@@ -3,7 +3,7 @@
 Extracts all key entities (business concepts) that need to be modeled.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
@@ -11,6 +11,7 @@ from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
 from NL2DATA.ir.models.state import EntityInfo
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -26,9 +27,9 @@ async def step_1_4_key_entity_extraction(
     nl_description: str,
     domain: Optional[str] = None,
     mentioned_entities: Optional[List[str]] = None,
-    domain_detection_result: Optional[Dict[str, Any]] = None,
-    entity_mention_result: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    domain_detection_result: Optional = None,
+    entity_mention_result: Optional = None,
+) -> EntityExtractionOutput:
     """
     Step 1.4: Extract all key entities (business concepts) that need to be modeled.
     
@@ -37,7 +38,7 @@ async def step_1_4_key_entity_extraction(
     
     Args:
         nl_description: Natural language description of the database requirements
-        domain: Optional domain from Steps 1.1 or 1.3
+        domain: Optional domain from Step 1.1 (Domain Detection & Inference)
         mentioned_entities: Optional list of explicitly mentioned entities from Step 1.2
         domain_detection_result: Optional result from Step 1.1 for context
         entity_mention_result: Optional result from Step 1.2 for context
@@ -123,6 +124,14 @@ async def step_1_4_key_entity_extraction(
         cleaned = re.sub(r"_+", "_", cleaned)
         return cleaned
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=EntityExtractionOutput,
+        additional_requirements=[
+            "The \"evidence\" field MUST be a verbatim substring from the input description"
+        ]
+    )
+    
     system_prompt = """You are an information-extraction assistant.
 
 Task
@@ -161,21 +170,28 @@ Naming rules
 De-duplication
 - De-duplicate semantically identical entities; pick the most canonical name.
 
-Output requirements (MUST follow)
-Return ONLY a JSON object that matches this schema exactly:
-{
-  "entities": [
-    {
-      "name": "string",
-      "mention_type": "explicit"|"implied",
-      "evidence": "string",
-      "description": "string",
-      "confidence": number
-    }
-  ]
-}
+CRITICAL: SCHEMA ANCHORED VALIDATION
+Before outputting any entity name:
+1. Check if it already exists in the provided schema context (if prior_context is provided)
+2. Use EXACT names from the schema (case-sensitive) if the entity already exists
+3. Do NOT invent new names unless explicitly creating new components
+4. If prior_context mentions entities, prefer those exact names
 
-No extra text. No markdown. No code fences."""
+EXAMPLES:
+❌ BAD: Outputting "CustomerOrder" when schema has "Order"
+❌ BAD: Outputting "ProductCategory" when schema has "Category"
+✅ GOOD: Using exact names from schema: "Order", "Category"
+✅ GOOD: Creating new entity "MaintenanceEvent" if not in prior context
+
+COMMON MISTAKES TO AVOID:
+1. ❌ Mixing entity names (e.g., "CustomerOrder" vs "Order")
+2. ❌ Inventing compound names when simpler names exist
+3. ❌ Using plural forms when singular is canonical
+4. ❌ Ignoring prior context when it provides entity names
+
+If unsure, err on the side of conservatism (use existing names from context).
+
+""" + output_structure_section
     
     # Human prompt template
     human_prompt = """description: {nl_description}
@@ -232,10 +248,7 @@ prior_context:
             entity_names = [e.name for e in result.entities]
             logger.info(f"Extracted entities: {', '.join(entity_names)}")
         
-        # Convert to dict only at the very end for return compatibility
-        # Note: Return type is Dict[str, Any] for compatibility with pipeline.
-        # Future enhancement: Consider changing return type to EntityExtractionOutput for type safety.
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error in key entity extraction: {e}", exc_info=True)

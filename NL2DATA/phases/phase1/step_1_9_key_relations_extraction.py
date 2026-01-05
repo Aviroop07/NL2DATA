@@ -5,7 +5,7 @@ Critical for foreign key design and understanding data flow.
 """
 
 import json
-from typing import Dict, Any, List, Optional, Any as AnyType
+from typing import List, Optional, Dict, Any
 import re
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -13,10 +13,10 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.ir.models.state import RelationInfo
 from NL2DATA.phases.phase1.utils import (
     extract_entity_name,
-    extract_entity_description,
     build_entity_list_string,
 )
 from NL2DATA.utils.tools.validation_tools import _verify_entities_exist_impl
@@ -74,12 +74,12 @@ class RelationExtractionOutput(BaseModel):
 
 @traceable_step("1.9", phase=1, tags=["relation_extraction"])
 async def step_1_9_key_relations_extraction(
-    entities: List[Dict[str, Any]],
+    entities: List,
     nl_description: str,
     domain: Optional[str] = None,
-    mentioned_relations: Optional[List[AnyType]] = None,
+    mentioned_relations: Optional[List[Any]] = None,
     focus_entities: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+) -> RelationExtractionOutput:
     """
     Step 1.9: Identify all relationships among entities.
     
@@ -121,6 +121,19 @@ async def step_1_9_key_relations_extraction(
             explicit_relations_json = json.dumps(mentioned_relations, indent=2, ensure_ascii=False)
         except Exception:
             explicit_relations_json = str(mentioned_relations)
+    
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=RelationExtractionOutput,
+        additional_requirements=[
+            "Top-level key MUST be \"relations\" (NOT \"relationships\", NOT any other key)",
+            "Relation type MUST be one of the exact enum strings: 'one-to-one', 'one-to-many', 'many-to-one', 'many-to-many', 'ternary'",
+            "entities list MUST contain at least 2 different entity names (NO self-relations, NO duplicate entity names)",
+            "All entity names MUST exist in the provided entity list (verify with tool)",
+            "If source='explicit_in_text', evidence MUST be verbatim substring from input and confidence MUST be null",
+            "If source='schema_inferred', confidence MUST be 0.0-1.0 and evidence MUST be null"
+        ]
+    )
     
     # System prompt
     system_prompt = """You are a database design assistant.
@@ -169,6 +182,26 @@ Important constraints:
 - NO self-relations: entities list must contain at least 2 different entity names
 - Each relationship must involve distinct entities (no duplicate entity names in the entities list)
 
+CRITICAL: SCHEMA ANCHORED VALIDATION
+Before outputting any entity name in a relation:
+1. Check if it exists in the provided entity list (use verify_entities_exist_bound tool)
+2. Use EXACT names from the entity list (case-sensitive)
+3. Do NOT invent new entity names - only use entities from the provided list
+
+EXAMPLES:
+❌ BAD: Relation with entities ["CustomerOrder", "Product"] when entity list has ["Order", "Product"]
+❌ BAD: Relation with entities ["Customer", "OrderItem"] when entity list has ["Customer", "Order"]
+✅ GOOD: Using exact names from entity list: ["Customer", "Order"], ["Product", "Category"]
+
+COMMON MISTAKES TO AVOID:
+1. ❌ Listing relations with non-existent entities (always verify with tool first)
+2. ❌ Mixing entity names (e.g., "CustomerOrder" vs "Order")
+3. ❌ Creating self-relations (entity to itself)
+4. ❌ Including attributes/properties instead of relationships
+5. ❌ Adding unnecessary star-schema joins
+
+If unsure, err on the side of conservatism (verify entities exist, use exact names).
+
 Tool usage (mandatory)
 You have access to two tools:
 1) verify_entities_exist_bound(entities: List[str]) -> Dict[str, bool]
@@ -186,28 +219,7 @@ Before finalizing your response:
    c) If source="explicit_in_text", call verify_evidence_substring with: {{"evidence": <relation.evidence>, "nl_description": <full_nl_description>}}
    d) If is_substring=false, correct the evidence to be an exact substring and re-check
 
-Output schema (STRICT)
-Return ONLY a JSON object that matches this schema exactly:
-{
-  "relations": [
-    {
-      "entities": ["EntityA", "EntityB"],
-      "type": "one-to-many",
-      "description": "string",
-      "arity": 2,
-      "reasoning": "string",
-      "source": "explicit_in_text",
-      "evidence": "verbatim substring from description",
-      "confidence": null,
-      "entity_cardinalities": null,
-      "entity_participations": null
-    }
-  ]
-}
-
-Final reminder:
-- Top-level key MUST be "relations" (NOT "relationships").
-- No extra keys. No markdown. No code fences."""
+""" + output_structure_section
     
     # Human prompt template
     focus_block = ""
@@ -282,6 +294,8 @@ Natural language description:
         # Post-processing validation: filter out invalid relations
         valid_relations = []
         entity_names = {e.get("name") or extract_entity_name(e) for e in entities}
+        # Create case-insensitive lookup for entity name matching
+        entity_names_lower = {name.lower(): name for name in entity_names if name}
         
         for relation in relations:
             entities_in_rel = relation.entities
@@ -296,11 +310,30 @@ Natural language description:
                 logger.warning(f"Skipping self-relation: {entities_in_rel}")
                 continue
             
-            # Validation: all entities must exist in the schema
-            if not all(entity in entity_names for entity in entities_in_rel):
-                missing = [e for e in entities_in_rel if e not in entity_names]
+            # Validation: all entities must exist in the schema (case-insensitive matching)
+            # Normalize relation entity names to match schema entities
+            normalized_entities_in_rel = []
+            for rel_entity in entities_in_rel:
+                rel_entity_lower = (rel_entity or "").strip().lower()
+                if rel_entity_lower in entity_names_lower:
+                    # Use the canonical entity name from schema
+                    normalized_entities_in_rel.append(entity_names_lower[rel_entity_lower])
+                elif rel_entity in entity_names:
+                    # Already matches exactly
+                    normalized_entities_in_rel.append(rel_entity)
+                else:
+                    # Entity doesn't exist - will be caught below
+                    normalized_entities_in_rel.append(rel_entity)
+            
+            # Check if all entities exist (after normalization)
+            if not all(e in entity_names for e in normalized_entities_in_rel):
+                missing = [e for e in normalized_entities_in_rel if e not in entity_names]
                 logger.warning(f"Skipping relation with unknown entities {missing}: {entities_in_rel}")
                 continue
+            
+            # Update relation with normalized entity names
+            if normalized_entities_in_rel != entities_in_rel:
+                relation = relation.model_copy(update={"entities": normalized_entities_in_rel})
 
             # Validation: evidence must be grounded when explicit_in_text
             if relation.source == "explicit_in_text":
@@ -397,8 +430,7 @@ Natural language description:
         # Create updated result with validated relations
         validated_result = RelationExtractionOutput(relations=valid_relations)
         
-        # Convert to dict only at return boundary
-        return validated_result.model_dump()
+        return validated_result
         
     except Exception as e:
         logger.error(f"Error in key relations extraction: {e}", exc_info=True)

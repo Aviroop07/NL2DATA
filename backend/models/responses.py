@@ -78,4 +78,20 @@ class DistributionMetadataResponse(BaseModel):
     distributions: List[DistributionMetadata]
 
 
+class CheckpointResponse(BaseModel):
+    """Response for checkpoint data."""
+    checkpoint_type: str  # "domain" | "entities" | "relations" | "attributes" | "primary_keys" | "multivalued_derived" | "nullability" | "default_values" | "check_constraints" | "phase2_final" | "er_diagram" | "datatypes" | "relational_schema" | "complete"
+    data: Dict[str, Any]  # Checkpoint-specific data
+    justification: Optional[Dict[str, Any]] = None  # Justification/reasoning for the checkpoint
+
+
+class CheckpointProceedResponse(BaseModel):
+    """Response when proceeding to next checkpoint."""
+    status: str  # "success" | "error"
+    message: str
+    next_checkpoint: Optional[str] = None  # Next checkpoint type if available
+    checkpoint_data: Optional[Dict[str, Any]] = None  # Checkpoint data directly in response (no polling needed)
+    checkpoint_justification: Optional[Dict[str, Any]] = None  # Justification for the checkpoint
+
+
 

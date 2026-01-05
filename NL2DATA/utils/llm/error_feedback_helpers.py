@@ -12,7 +12,19 @@ def format_missing_fields_feedback(
 ) -> str:
     """Format feedback for missing required fields."""
     feedback += f"ERROR Missing required fields: {', '.join(missing_fields)}\n"
-    feedback += f"   These fields are REQUIRED and must be included in your output.\n\n"
+    feedback += f"   These fields are REQUIRED and must be included in your output.\n"
+    
+    # Special handling for attribute_types field (common issue with empty dicts)
+    if "attribute_types" in missing_fields:
+        feedback += f"\n   CRITICAL: The 'attribute_types' field is a REQUIRED dictionary that MUST NOT be empty.\n"
+        feedback += f"   You returned an empty dictionary {{}} which is INVALID.\n"
+        feedback += f"   The 'attribute_types' dictionary MUST contain at least one entry with the attribute name as the key.\n"
+        feedback += f"   Example: {{\"attribute_types\": {{\"customer_name\": {{\"type\": \"VARCHAR\", \"size\": 255, ...}}}}}}\n"
+        feedback += f"   NOT: {{\"attribute_types\": {{}}}} (empty dict is INVALID)\n"
+        feedback += f"   NOT: {{}} (missing field is INVALID)\n\n"
+    else:
+        feedback += "\n"
+    
     return feedback
 
 

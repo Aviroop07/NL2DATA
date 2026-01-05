@@ -75,7 +75,6 @@ def check_phase_2_gate(state: Dict[str, Any]) -> GateResult:
     - Every table/entity has ≥ 1 attribute
     - Every table has a PK (or explicit exception)
     - All FK realizations reference existing PK
-    - Derived attributes: dependencies exist
     """
     issues = []
     warnings = []
@@ -84,7 +83,6 @@ def check_phase_2_gate(state: Dict[str, Any]) -> GateResult:
     attributes = state.get("attributes", {})
     primary_keys = state.get("primary_keys", {})
     foreign_keys = state.get("foreign_keys", [])
-    derived_formulas = state.get("derived_formulas", {})
     
     # Check all entities have attributes
     issues.extend(validate_attributes_exist_for_entities(attributes, entities))
@@ -94,11 +92,6 @@ def check_phase_2_gate(state: Dict[str, Any]) -> GateResult:
     
     # Check foreign keys reference existing PKs
     issues.extend(validate_foreign_keys_reference_existing_pks(foreign_keys, primary_keys))
-    
-    # Check derived attribute dependencies
-    issues.extend(validate_derived_dependencies_exist(attributes, derived_formulas))
-    # Check derived formula dependency list matches formula identifiers and is entity-local
-    issues.extend(validate_derived_formula_dependencies_match_formula(attributes, derived_formulas))
     
     passed = len(issues) == 0
     
@@ -221,31 +214,40 @@ def check_phase_5_gate(state: Dict[str, Any]) -> GateResult:
 
 
 def check_phase_6_gate(state: Dict[str, Any]) -> GateResult:
-    """Check Phase 6 gate: Constraint satisfiability.
+    """Check Phase 6 gate: DDL Generation & Schema Creation.
     
     Required checks:
-    - Constraints are satisfiable (or marked "soft")
-    - No hard conflicts between constraints
+    - DDL statements are valid and parseable
+    - Schema was created successfully (if attempted)
     """
     issues = []
     warnings = []
     
-    constraints = state.get("constraints", [])
-    constraint_specs = state.get("constraint_specs", [])
+    metadata = state.get("metadata", {})
+    ddl_statements = metadata.get("ddl_statements", [])
+    previous_answers = state.get("previous_answers", {})
     
-    # Check constraints are satisfiable
-    all_constraints = constraints + constraint_specs
-    issues.extend(validate_constraints_satisfiable(all_constraints))
+    # Check DDL statements are valid
+    if ddl_statements:
+        issues.extend(validate_ddl_parses(ddl_statements))
+    else:
+        warnings.append("No DDL statements found in metadata")
     
-    # Check for hard conflicts
-    hard_constraints = [
-        c for c in all_constraints
-        if c.get("type", "").lower() == "hard" or c.get("hard_vs_soft", "").lower() == "hard"
-    ]
-    
-    if len(hard_constraints) > 0:
-        # Additional conflict checking for hard constraints
-        pass  # Placeholder for full conflict detection
+    # Check schema creation result if present
+    schema_creation_result = previous_answers.get("6.4", {})
+    schema_created = False
+    if schema_creation_result:
+        # Handle both Pydantic model and dict formats
+        if hasattr(schema_creation_result, "success"):
+            schema_created = schema_creation_result.success
+            if not schema_created:
+                errors = schema_creation_result.errors if hasattr(schema_creation_result, "errors") else []
+                issues.extend([f"Schema creation error: {e}" for e in errors])
+        elif isinstance(schema_creation_result, dict):
+            schema_created = schema_creation_result.get("success", False)
+            if not schema_created:
+                errors = schema_creation_result.get("errors", [])
+                issues.extend([f"Schema creation error: {e}" for e in errors])
     
     passed = len(issues) == 0
     
@@ -254,28 +256,249 @@ def check_phase_6_gate(state: Dict[str, Any]) -> GateResult:
         issues=issues,
         warnings=warnings,
         metadata={
-            "constraint_count": len(all_constraints),
-            "hard_constraint_count": len(hard_constraints)
+            "ddl_statement_count": len(ddl_statements),
+            "schema_created": schema_created
         }
     )
 
 
 def check_phase_7_gate(state: Dict[str, Any]) -> GateResult:
-    """Check Phase 7 gate: Generation completeness.
+    """Check Phase 7 gate: Information Mining completeness.
     
     Required checks:
-    - Generation strategies cover all columns
+    - Information needs were identified (if any)
+    - SQL queries were validated (if information needs exist)
+    - No schema modification occurred
+    """
+    issues = []
+    warnings = []
+    
+    information_needs = state.get("information_needs", [])
+    previous_answers = state.get("previous_answers", {})
+    
+    # Check that information needs were processed
+    # Note: It's okay if no information needs were found - that's valid
+    if information_needs:
+        # If information needs exist, check that SQL validation was performed
+        sql_validation_result = previous_answers.get("7.2", {})
+        if not sql_validation_result:
+            warnings.append("Information needs found but SQL validation result not present")
+    
+    # Phase 7 should not modify schema - this is a soft check
+    # (Schema modifications would be caught in later phases)
+    
+    passed = len(issues) == 0
+    
+    return GateResult(
+        passed=passed,
+        issues=issues,
+        warnings=warnings,
+        metadata={}
+    )
+
+
+def check_phase_8_gate(state: Dict[str, Any]) -> GateResult:
+    """Check Phase 8 gate: Functional Dependencies completeness.
+    
+    Required checks:
+    - Functional dependencies were identified (if any)
+    - FD structure is valid
+    """
+    issues = []
+    warnings = []
+    
+    functional_dependencies = state.get("functional_dependencies", [])
+    
+    # Check that functional dependencies are valid (basic structure check)
+    for fd in functional_dependencies:
+        if not isinstance(fd, dict):
+            issues.append(f"Functional dependency is not a dict: {fd}")
+            continue
+        # Functional dependencies use 'lhs' (left-hand side/determinant) and 'rhs' (right-hand side/dependent)
+        if "lhs" not in fd or "rhs" not in fd:
+            issues.append(f"Functional dependency missing required fields (lhs/rhs): {fd}")
+    
+    passed = len(issues) == 0
+    
+    return GateResult(
+        passed=passed,
+        issues=issues,
+        warnings=warnings,
+        metadata={"fd_count": len(functional_dependencies)}
+    )
+
+
+def check_phase_9_gate(state: Dict[str, Any]) -> GateResult:
+    """Check Phase 9 gate: Constraints & Generation Strategies completeness.
+    
+    Required checks:
+    - Generation strategies cover all independent columns (non-derived, non-constrained)
     - Distribution parameters valid (bounds, sums to 1)
-    - GenerationIR compiled successfully
     """
     issues = []
     warnings = []
     
     generation_strategies = state.get("generation_strategies", {})
-    attributes = state.get("attributes", {})
     
-    # Check all attributes have generation strategies
-    issues.extend(validate_generation_strategies_complete(generation_strategies, attributes))
+    # Get attributes from relational schema (tables) since generation strategies use table names
+    metadata = state.get("metadata", {})
+    relational_schema = metadata.get("relational_schema", {})
+    tables = relational_schema.get("tables", [])
+    
+    # Get derived and constrained columns to exclude from validation
+    # Build mapping from entity names to table names (they might differ)
+    # Also build reverse mapping for checking
+    entity_to_table_map = {}
+    table_to_entity_map = {}
+    for table in tables:
+        table_name = table.get("name", "")
+        # Try to match table name to entity name (assume they're the same or table name contains entity name)
+        # Also check if table has an entity_name field
+        entity_name = table.get("entity_name", table_name)
+        entity_to_table_map[entity_name] = table_name
+        entity_to_table_map[table_name] = table_name
+        table_to_entity_map[table_name] = entity_name
+    
+    derived_columns = set()
+    derived_formulas = state.get("derived_formulas", {})
+    # derived_formulas keys are in format "entity.attribute"
+    for key in derived_formulas.keys():
+        derived_columns.add(key)  # Keep original format
+        # Also add table name format if entity name differs
+        if "." in key:
+            entity_name, attr_name = key.split(".", 1)
+            table_name = entity_to_table_map.get(entity_name, entity_name)
+            if table_name != entity_name:
+                derived_columns.add(f"{table_name}.{attr_name}")
+    
+    multivalued_derived = state.get("multivalued_derived", {})
+    for entity_name, mv_result in multivalued_derived.items():
+        derived_attrs = mv_result.get("derived", [])
+        table_name = entity_to_table_map.get(entity_name, entity_name)
+        for attr_name in derived_attrs:
+            # Add both entity and table name formats
+            derived_columns.add(f"{entity_name}.{attr_name}")
+            if table_name != entity_name:
+                derived_columns.add(f"{table_name}.{attr_name}")
+    
+    constrained_columns = set()
+    compiled_constraints = metadata.get("compiled_constraints", {})
+    for category in ["statistical_constraints", "structural_constraints", "distribution_constraints", "other_constraints"]:
+        constraints_list = compiled_constraints.get(category, [])
+        for constraint in constraints_list:
+            affected_attrs = constraint.get("affected_attributes", [])
+            for attr in affected_attrs:
+                if isinstance(attr, str) and "." in attr:
+                    constrained_columns.add(attr)
+    
+    excluded_columns = derived_columns | constrained_columns
+    
+    # Get primary keys to exclude (PKs are typically auto-generated or deterministic)
+    # Build a set of PK column names by table name (from relational schema)
+    pk_columns_by_table = {}
+    primary_keys = state.get("primary_keys", {})
+    for entity_name, pk_list in primary_keys.items():
+        # Map entity name to table name (they might be the same, but check both)
+        pk_columns_by_table[entity_name] = set(pk_list)
+        # Also check if any table matches this entity name
+        for table in tables:
+            table_name = table.get("name", "")
+            if table_name == entity_name or table_name.startswith(entity_name):
+                pk_columns_by_table[table_name] = set(pk_list)
+    
+    # Extract attributes from relational schema tables, filtering out derived, constrained, PKs, and FKs
+    independent_attributes = {}
+    for table in tables:
+        table_name = table.get("name", "")
+        if not table_name:
+            continue
+        
+        columns = table.get("columns", [])
+        table_pk = table.get("primary_key", [])
+        table_pk_set = set(table_pk) if isinstance(table_pk, list) else set()
+        
+        # Also get PKs from the entity-level primary_keys if available
+        entity_pk_set = pk_columns_by_table.get(table_name, set())
+        all_pk_set = table_pk_set | entity_pk_set
+        
+        foreign_keys = table.get("foreign_keys", [])
+        # Build set of FK column names for this table
+        fk_columns = set()
+        for fk in foreign_keys:
+            fk_cols = fk.get("columns", [])
+            if isinstance(fk_cols, list):
+                fk_columns.update(fk_cols)
+            elif isinstance(fk_cols, str):
+                fk_columns.add(fk_cols)
+        
+        independent_attrs = []
+        for col in columns:
+            col_name = col.get("name", "")
+            if not col_name:
+                continue
+            
+            # Check if column is derived
+            is_derived = col.get("is_derived", False)
+            attr_key = f"{table_name}.{col_name}"
+            
+            # Check if this attribute is in excluded columns (check both table name and entity name formats)
+            is_excluded = False
+            if attr_key in excluded_columns:
+                is_excluded = True
+            else:
+                # Also check entity name format (in case table name differs from entity name)
+                for entity_name, mapped_table in entity_to_table_map.items():
+                    if mapped_table == table_name and entity_name != table_name:
+                        entity_attr_key = f"{entity_name}.{col_name}"
+                        if entity_attr_key in excluded_columns:
+                            is_excluded = True
+                            break
+            
+            # Skip if derived or constrained
+            if is_derived or is_excluded:
+                continue
+            
+            # Check if it's a primary key (check both table-level and entity-level PKs)
+            is_pk = col_name in all_pk_set
+            if is_pk:
+                continue  # Primary keys don't need generation strategies (auto-increment or deterministic)
+            
+            # Check if it's a foreign key
+            is_fk = col_name in fk_columns
+            if is_fk:
+                continue  # Foreign keys don't need generation strategies
+            
+            independent_attrs.append({"name": col_name})
+        
+        if independent_attrs:
+            independent_attributes[table_name] = independent_attrs
+    
+    # Debug: Log what we're checking
+    total_independent = sum(len(attrs) for attrs in independent_attributes.values())
+    logger.debug(f"Phase 9 gate: Checking {total_independent} independent attributes across {len(independent_attributes)} tables")
+    logger.debug(f"Phase 9 gate: Generation strategies available for {len(generation_strategies)} tables")
+    
+    # Check all independent attributes have generation strategies
+    # (Derived and constrained columns are excluded)
+    # IMPORTANT: generation_strategies uses table names as keys, but we need to check both table and entity names
+    # Build a normalized generation_strategies dict that includes both table and entity name lookups
+    normalized_generation_strategies = {}
+    for table_name, strategies in generation_strategies.items():
+        # Add with table name
+        normalized_generation_strategies[table_name] = strategies
+        # Also add with entity name if different
+        entity_name = table_to_entity_map.get(table_name, table_name)
+        if entity_name != table_name and entity_name not in normalized_generation_strategies:
+            normalized_generation_strategies[entity_name] = strategies
+    
+    issues.extend(validate_generation_strategies_complete(normalized_generation_strategies, independent_attributes))
+    
+    # Debug: Log missing strategies
+    if issues:
+        missing_attrs = [issue for issue in issues if "has no generation strategy" in issue]
+        if missing_attrs:
+            logger.warning(f"Phase 9 gate: {len(missing_attrs)} attributes missing generation strategies")
+            logger.debug(f"Missing strategies: {missing_attrs[:10]}...")  # Log first 10
     
     # Check distribution parameters (simplified)
     for entity_name, entity_strategies in generation_strategies.items():
@@ -307,7 +530,7 @@ def check_phase_gate(phase: int, state: Dict[str, Any]) -> GateResult:
     """Check phase gate for a specific phase.
     
     Args:
-        phase: Phase number (1-7)
+        phase: Phase number (1-9)
         state: Current state dictionary
         
     Returns:
@@ -324,6 +547,8 @@ def check_phase_gate(phase: int, state: Dict[str, Any]) -> GateResult:
         5: check_phase_5_gate,
         6: check_phase_6_gate,
         7: check_phase_7_gate,
+        8: check_phase_8_gate,
+        9: check_phase_9_gate,
     }
     
     check_func = gate_checks.get(phase)

@@ -12,12 +12,41 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 from langchain_core.tools import BaseTool
 
 # LangChain import compatibility:
-# - Newer versions may not export AgentExecutor from langchain.agents
-try:
-    from langchain.agents import create_tool_calling_agent
-    from langchain.agents.agent import AgentExecutor  # type: ignore
-except Exception:  # pragma: no cover
-    from langchain.agents import AgentExecutor, create_tool_calling_agent  # type: ignore
+# - LangChain 1.0.0+ moved these to langchain-classic
+# - Older versions have them in langchain.agents
+# - Make imports lazy to avoid import errors when not used
+_AgentExecutor = None
+_create_tool_calling_agent = None
+
+def _lazy_import_agents():
+    """Lazy import of AgentExecutor and create_tool_calling_agent."""
+    global _AgentExecutor, _create_tool_calling_agent
+    if _AgentExecutor is not None and _create_tool_calling_agent is not None:
+        return _AgentExecutor, _create_tool_calling_agent
+    
+    try:
+        from langchain_classic.agents import AgentExecutor, create_tool_calling_agent  # type: ignore
+        _AgentExecutor = AgentExecutor
+        _create_tool_calling_agent = create_tool_calling_agent
+    except ImportError:
+        try:
+            from langchain.agents import create_tool_calling_agent
+            from langchain.agents.agent import AgentExecutor  # type: ignore
+            _AgentExecutor = AgentExecutor
+            _create_tool_calling_agent = create_tool_calling_agent
+        except ImportError:
+            try:
+                from langchain.agents import AgentExecutor, create_tool_calling_agent  # type: ignore
+                _AgentExecutor = AgentExecutor
+                _create_tool_calling_agent = create_tool_calling_agent
+            except ImportError as e:
+                raise ImportError(
+                    "Could not import AgentExecutor or create_tool_calling_agent. "
+                    "Please install langchain-classic or ensure langchain version is compatible. "
+                    f"Error: {e}"
+                ) from e
+    
+    return _AgentExecutor, _create_tool_calling_agent
 
 # Try to import RunnableRetry for network retries
 try:
@@ -112,6 +141,9 @@ def create_agent_executor_chain(
         except Exception as e:
             logger.warning(f"Could not create LLM copy with max_retries=0: {e}. Using original LLM.")
             llm_for_agent = llm
+    
+    # Lazy import agents
+    AgentExecutor, create_tool_calling_agent = _lazy_import_agents()
     
     agent = create_tool_calling_agent(llm_for_agent, structured_tools, prompt)
     
@@ -319,6 +351,9 @@ def create_tool_only_executor(
         except Exception as e:
             logger.warning(f"Could not create LLM copy with max_retries=0: {e}. Using original LLM.")
             llm_for_agent = llm
+    
+    # Lazy import agents
+    AgentExecutor, create_tool_calling_agent = _lazy_import_agents()
     
     # Create agent
     agent = create_tool_calling_agent(llm_for_agent, structured_tools, prompt)

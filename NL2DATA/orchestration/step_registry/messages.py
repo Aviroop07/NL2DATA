@@ -11,7 +11,7 @@ STEP_MESSAGE_TEMPLATES = {
     # Phase 1: Domain & Entity Discovery
     "P1_S1_DOMAIN_DETECTION": "Detecting the primary domain from the description",
     "P1_S2_ENTITY_MENTION": "Finding explicitly mentioned entities",
-    "P1_S3_DOMAIN_INFERENCE": "Inferring domain context and nuances",
+    # "P1_S3_DOMAIN_INFERENCE": Removed - merged into P1_S1_DOMAIN_DETECTION
     "P1_S4_KEY_ENTITY_EXTRACTION": "Extracting key entities for the schema",
     "P1_S5_RELATION_MENTION": "Identifying explicitly stated relations",
     "P1_S6_AUXILIARY_ENTITIES": "Suggesting auxiliary/supporting entities",
@@ -55,12 +55,12 @@ STEP_MESSAGE_TEMPLATES = {
     "P4_S6_CATEGORICAL_VALUES": "Identifying categorical values for {attribute}",
     "P4_S7_CATEGORICAL_DISTRIBUTION": "Defining categorical distributions for {attribute}",
     
-    # Phase 5: DDL & SQL Generation
-    "P5_S1_DDL_COMPILATION": "Compiling DDL statements",
-    "P5_S2_DDL_VALIDATION": "Validating DDL syntax",
-    "P5_S3_DDL_ERROR_CORRECTION": "Correcting DDL errors",
-    "P5_S4_SCHEMA_CREATION": "Creating database schema",
-    "P5_S5_SQL_GENERATION": "Generating SQL query for {information_need}",
+    # Phase 10: DDL & SQL Generation
+    "P10_S1_DDL_COMPILATION": "Compiling DDL statements",
+    "P10_S2_DDL_VALIDATION": "Validating DDL syntax",
+    "P10_S3_DDL_ERROR_CORRECTION": "Correcting DDL errors",
+    "P10_S4_SCHEMA_CREATION": "Creating database schema",
+    "P10_S5_SQL_GENERATION": "Generating SQL query for {information_need}",
     
     # Phase 6: Constraints & Distributions
     "P6_S1_CONSTRAINT_DETECTION": "Detecting constraints",

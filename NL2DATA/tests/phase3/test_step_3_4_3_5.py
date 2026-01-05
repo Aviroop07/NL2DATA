@@ -1,16 +1,16 @@
-"""Test script for Steps 3.4 and 3.5: ER Design and Relational Schema Compilation."""
+"""Test script for Steps 4.1 and 4.3: ER Design and Relational Schema Compilation."""
 
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from NL2DATA.phases.phase3 import step_3_4_er_design_compilation, step_3_5_relational_schema_compilation
+from NL2DATA.phases.phase4 import step_4_1_er_design_compilation, step_4_3_relational_schema_compilation
 from NL2DATA.utils.logging import setup_logging, get_logger
 from NL2DATA.config import get_config
 
 def test_steps_3_4_3_5():
-    """Test Steps 3.4 and 3.5: ER Design and Relational Schema Compilation."""
+    """Test Steps 4.1 and 4.3: ER Design and Relational Schema Compilation."""
     logger = get_logger(__name__)
     setup_logging(
         level=get_config('logging')['level'],
@@ -20,7 +20,7 @@ def test_steps_3_4_3_5():
     )
     
     print("=" * 80)
-    print("Testing Steps 3.4 and 3.5: ER Design and Relational Schema Compilation")
+    print("Testing Steps 4.1 and 4.3: ER Design and Relational Schema Compilation")
     print("=" * 80)
     
     all_passed = True
@@ -69,9 +69,9 @@ def test_steps_3_4_3_5():
             }
         ]
         
-        # Step 3.4: ER Design Compilation
-        print("\nStep 3.4: ER Design Compilation")
-        er_design = step_3_4_er_design_compilation(
+        # Step 4.1: ER Design Compilation
+        print("\nStep 4.1: ER Design Compilation")
+        er_design = step_4_1_er_design_compilation(
             entities=entities,
             relations=relations,
             attributes=attributes,
@@ -83,7 +83,7 @@ def test_steps_3_4_3_5():
         compiled_relations = er_design.get("relations", [])
         compiled_attributes = er_design.get("attributes", {})
         
-        print(f"[PASS] Step 3.4 completed")
+        print(f"[PASS] Step 4.1 completed")
         print(f"  - Entities: {len(compiled_entities)}")
         print(f"  - Relations: {len(compiled_relations)}")
         print(f"  - Attributes: {len(compiled_attributes)} entities with attributes")
@@ -94,9 +94,9 @@ def test_steps_3_4_3_5():
         else:
             print(f"    [OK] ER design compilation successful")
         
-        # Step 3.5: Relational Schema Compilation
-        print("\nStep 3.5: Relational Schema Compilation")
-        relational_schema = step_3_5_relational_schema_compilation(
+        # Step 4.3: Relational Schema Compilation
+        print("\nStep 4.3: Relational Schema Compilation")
+        relational_schema = step_4_3_relational_schema_compilation(
             er_design=er_design,
             foreign_keys=foreign_keys,
             primary_keys=primary_keys,
@@ -104,7 +104,7 @@ def test_steps_3_4_3_5():
         
         tables = relational_schema.get("tables", [])
         
-        print(f"[PASS] Step 3.5 completed")
+        print(f"[PASS] Step 4.3 completed")
         print(f"  - Tables: {len(tables)}")
         
         for table in tables:
@@ -122,13 +122,13 @@ def test_steps_3_4_3_5():
         
         print("\n" + "=" * 80)
         if all_passed:
-            print("[PASS] All Steps 3.4 and 3.5 tests passed!")
+            print("[PASS] All Steps 4.1 and 4.3 tests passed!")
         else:
-            print("[ERROR] Some Steps 3.4 and 3.5 tests failed")
+            print("[ERROR] Some Steps 4.1 and 4.3 tests failed")
         print("=" * 80)
         
     except Exception as e:
-        print(f"\n[ERROR] Steps 3.4 and 3.5 test failed: {e}")
+        print(f"\n[ERROR] Steps 4.1 and 4.3 test failed: {e}")
         import traceback
         traceback.print_exc()
         all_passed = False

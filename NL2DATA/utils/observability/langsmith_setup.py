@@ -43,9 +43,21 @@ def setup_langsmith(
         >>> setup_langsmith(project_name="my_project")
         True
     """
-    # Check if already configured
+    # Check if already configured. If so, still allow callers to override
+    # project name / endpoint for better trace grouping.
     if os.getenv("LANGCHAIN_TRACING_V2"):
-        logger.info("LangSmith already configured via LANGCHAIN_TRACING_V2")
+        if project_name:
+            os.environ["LANGCHAIN_PROJECT"] = project_name
+        elif not os.getenv("LANGCHAIN_PROJECT"):
+            os.environ["LANGCHAIN_PROJECT"] = "nl2data"
+
+        if not os.getenv("LANGCHAIN_ENDPOINT"):
+            os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+
+        logger.info(
+            "LangSmith already configured via LANGCHAIN_TRACING_V2 "
+            f"(project={os.getenv('LANGCHAIN_PROJECT')}, endpoint={os.getenv('LANGCHAIN_ENDPOINT')})"
+        )
         return True
     
     # Get API key

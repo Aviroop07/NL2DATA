@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -75,6 +76,19 @@ def setup_logging(
     
     # Remove existing handlers
     root_logger.handlers.clear()
+    
+    # Suppress verbose logging from third-party libraries
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    
+    # Suppress LangChain warnings about Pydantic response_format streaming
+    # These are harmless warnings that occur when using with_structured_output
+    warnings.filterwarnings(
+        "ignore",
+        message="Streaming with Pydantic response_format not yet supported",
+        category=UserWarning,
+        module="langchain_openai.chat_models.base"
+    )
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)

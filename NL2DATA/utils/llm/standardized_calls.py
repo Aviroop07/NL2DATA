@@ -320,12 +320,13 @@ class StandardizedLLMCall:
                 except NoneFieldError as e:
                     raise  # Re-raise to trigger retry with feedback
             except ValidationError as e:
+                # Keep ValidationError so it can be caught by retry logic with proper error feedback
                 logger.error(
                     f"Failed to convert result to {self.output_schema.__name__}: {e}"
                 )
-                raise ValueError(
-                    f"LLM output is not compatible with {self.output_schema.__name__}"
-                ) from e
+                # Re-raise ValidationError so it's caught by chain_utils retry logic
+                # which has better error feedback handling for ValidationError
+                raise
         
         # Final None check before returning
         if result is None:
@@ -338,6 +339,18 @@ class StandardizedLLMCall:
             validate_no_none_fields(result, self.output_schema)
         except NoneFieldError as e:
             raise  # Re-raise to trigger retry with feedback
+        
+        # Special validation for DataTypeAssignmentOutput: reject empty attribute_types
+        # This is a common issue where LLM returns empty dict instead of populated dict
+        if hasattr(result, 'attribute_types'):
+            if isinstance(result.attribute_types, dict) and len(result.attribute_types) == 0:
+                raise NoneFieldError(
+                    f"LLM returned empty 'attribute_types' dictionary. "
+                    f"The 'attribute_types' field MUST contain at least one entry with the attribute name as the key. "
+                    f"Please provide a valid type assignment for the requested attribute.",
+                    none_fields=["attribute_types"],
+                    model_name=self.output_schema.__name__
+                )
         
         # Note: Detailed logging (messages + response) is now handled in chain_utils.py
         # after the chain invocation completes, so we don't duplicate it here.
@@ -358,10 +371,11 @@ class StandardizedLLMCall:
             else:
                 result_summary = str(result)[:200]
             
+            # Use a single log line without truncation
+            step_name = step_type or self.output_schema.__name__
+            response_type = type(result).__name__
             logger.info(
-                f"LLM Call Completed: {step_type or self.output_schema.__name__} -> "
-                f"Response Type: {type(result).__name__}, "
-                f"Summary: {result_summary}"
+                f"LLM Call Completed: {step_name} -> Response Type: {response_type}, Summary: {result_summary}"
             )
         except Exception as summary_error:
             logger.debug(f"Could not create result summary: {summary_error}")

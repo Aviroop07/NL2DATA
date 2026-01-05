@@ -1,9 +1,7 @@
 import React from 'react';
 import { Box, Paper, Container } from '@mui/material';
 import NLInputArea from '../nl-input/NLInputArea';
-import StatusTicker from '../progress/StatusTicker';
-import ERDiagramEditor from '../schema/ERDiagramEditor';
-import RelationalSchemaEditor from '../schema/RelationalSchemaEditor';
+import CheckpointReview from '../checkpoints/CheckpointReview';
 
 const MainPanel: React.FC = () => {
   return (
@@ -31,44 +29,7 @@ const MainPanel: React.FC = () => {
           <NLInputArea />
         </Paper>
         
-        <Paper 
-          elevation={0}
-          sx={{ 
-            p: 0, 
-            mb: 3,
-            flex: '0 0 auto',
-            border: '1px solid',
-            borderColor: 'divider',
-            overflow: 'hidden'
-          }}
-        >
-          <StatusTicker />
-        </Paper>
-        
-        <Paper 
-          elevation={0}
-          sx={{ 
-            p: 0, 
-            mb: 3,
-            border: '1px solid',
-            borderColor: 'divider',
-            overflow: 'hidden'
-          }}
-        >
-          <ERDiagramEditor />
-        </Paper>
-        
-        <Paper 
-          elevation={0}
-          sx={{ 
-            p: 0,
-            border: '1px solid',
-            borderColor: 'divider',
-            overflow: 'hidden'
-          }}
-        >
-          <RelationalSchemaEditor />
-        </Paper>
+        <CheckpointReview />
       </Container>
     </Box>
   );

@@ -17,13 +17,13 @@ PHASE_1_STEPS: Dict[str, StepDefinition] = {
         step_id="P1_S1_DOMAIN_DETECTION",
         phase=1,
         step_number="1.1",
-        name="Domain Detection",
+        name="Domain Detection & Inference",
         step_type=StepType.LLM,
         call_type=CallType.SINGULAR,
         fanout_unit="",
         can_parallelize=False,
         dependencies=[],
-        avg_tokens_per_call=2000,
+        avg_tokens_per_call=3000,  # Increased since it now handles both detection and inference
     ),
     "P1_S2_ENTITY_MENTION": StepDefinition(
         step_id="P1_S2_ENTITY_MENTION",
@@ -37,18 +37,6 @@ PHASE_1_STEPS: Dict[str, StepDefinition] = {
         dependencies=["P1_S1_DOMAIN_DETECTION"],
         avg_tokens_per_call=1500,
     ),
-    "P1_S3_DOMAIN_INFERENCE": StepDefinition(
-        step_id="P1_S3_DOMAIN_INFERENCE",
-        phase=1,
-        step_number="1.3",
-        name="Domain Inference",
-        step_type=StepType.LLM,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P1_S1_DOMAIN_DETECTION", "P1_S2_ENTITY_MENTION"],
-        avg_tokens_per_call=2000,
-    ),
     "P1_S4_KEY_ENTITY_EXTRACTION": StepDefinition(
         step_id="P1_S4_KEY_ENTITY_EXTRACTION",
         phase=1,
@@ -58,7 +46,7 @@ PHASE_1_STEPS: Dict[str, StepDefinition] = {
         call_type=CallType.SINGULAR,
         fanout_unit="",
         can_parallelize=False,
-        dependencies=["P1_S1_DOMAIN_DETECTION", "P1_S2_ENTITY_MENTION", "P1_S3_DOMAIN_INFERENCE"],
+        dependencies=["P1_S1_DOMAIN_DETECTION", "P1_S2_ENTITY_MENTION"],
         avg_tokens_per_call=3000,
     ),
     "P1_S5_RELATION_MENTION": StepDefinition(
@@ -349,14 +337,204 @@ PHASE_2_STEPS: Dict[str, StepDefinition] = {
 
 
 # ============================================================================
-# Phase 3: Query Requirements & Schema Refinement
+# Phase 3: ER Design Compilation
 # ============================================================================
 
 PHASE_3_STEPS: Dict[str, StepDefinition] = {
-    "P3_S1_INFORMATION_NEEDS": StepDefinition(
-        step_id="P3_S1_INFORMATION_NEEDS",
+    "P3_S1_ER_COMPILATION": StepDefinition(
+        step_id="P3_S1_ER_COMPILATION",
         phase=3,
         step_number="3.1",
+        name="ER Design Compilation",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P2_S14_RELATION_REALIZATION"],
+        avg_tokens_per_call=0,
+    ),
+    "P3_S2_JUNCTION_NAMING": StepDefinition(
+        step_id="P3_S2_JUNCTION_NAMING",
+        phase=3,
+        step_number="3.2",
+        name="Junction Table Naming",
+        step_type=StepType.LLM,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P3_S1_ER_COMPILATION"],
+        avg_tokens_per_call=1500,
+    ),
+}
+
+
+# ============================================================================
+# Phase 4: Relational Schema Compilation
+# ============================================================================
+
+PHASE_4_STEPS: Dict[str, StepDefinition] = {
+    "P4_S1_RELATIONAL_SCHEMA": StepDefinition(
+        step_id="P4_S1_RELATIONAL_SCHEMA",
+        phase=4,
+        step_number="4.1",
+        name="Relational Schema Compilation",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P3_S2_JUNCTION_NAMING"],
+        avg_tokens_per_call=0,
+    ),
+}
+
+
+# ============================================================================
+# Phase 5: Data Type Assignment
+# ============================================================================
+
+PHASE_5_STEPS: Dict[str, StepDefinition] = {
+    "P5_S1_DEPENDENCY_GRAPH": StepDefinition(
+        step_id="P5_S1_DEPENDENCY_GRAPH",
+        phase=5,
+        step_number="5.1",
+        name="Attribute Dependency Graph",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P4_S1_RELATIONAL_SCHEMA"],
+        avg_tokens_per_call=0,
+    ),
+    "P5_S2_INDEPENDENT_TYPES": StepDefinition(
+        step_id="P5_S2_INDEPENDENT_TYPES",
+        phase=5,
+        step_number="5.2",
+        name="Independent Attribute Data Types",
+        step_type=StepType.LLM,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P5_S1_DEPENDENCY_GRAPH"],
+        avg_tokens_per_call=2500,
+    ),
+    "P5_S3_FK_TYPES": StepDefinition(
+        step_id="P5_S3_FK_TYPES",
+        phase=5,
+        step_number="5.3",
+        name="Deterministic FK Data Types",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P5_S2_INDEPENDENT_TYPES"],
+        avg_tokens_per_call=0,
+    ),
+    "P5_S4_DEPENDENT_TYPES": StepDefinition(
+        step_id="P5_S4_DEPENDENT_TYPES",
+        phase=5,
+        step_number="5.4",
+        name="Dependent Attribute Data Types",
+        step_type=StepType.LLM,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P5_S3_FK_TYPES"],
+        avg_tokens_per_call=2500,
+    ),
+    "P5_S5_NULLABILITY": StepDefinition(
+        step_id="P5_S5_NULLABILITY",
+        phase=5,
+        step_number="5.5",
+        name="Nullability Detection",
+        step_type=StepType.LLM,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P5_S4_DEPENDENT_TYPES"],
+        avg_tokens_per_call=1500,
+    ),
+}
+
+
+# ============================================================================
+# Phase 6: DDL Generation & Schema Creation
+# ============================================================================
+
+PHASE_6_STEPS: Dict[str, StepDefinition] = {
+    "P6_S1_DDL_COMPILATION": StepDefinition(
+        step_id="P6_S1_DDL_COMPILATION",
+        phase=6,
+        step_number="6.1",
+        name="DDL Compilation",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P5_S5_NULLABILITY"],
+        avg_tokens_per_call=0,
+    ),
+    "P6_S2_DDL_VALIDATION": StepDefinition(
+        step_id="P6_S2_DDL_VALIDATION",
+        phase=6,
+        step_number="6.2",
+        name="DDL Validation",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P6_S1_DDL_COMPILATION"],
+        avg_tokens_per_call=0,
+    ),
+    "P6_S3_DDL_ERROR_CORRECTION": StepDefinition(
+        step_id="P6_S3_DDL_ERROR_CORRECTION",
+        phase=6,
+        step_number="6.3",
+        name="DDL Error Correction",
+        step_type=StepType.LLM,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P6_S2_DDL_VALIDATION"],
+        avg_tokens_per_call=3000,
+    ),
+    "P6_S4_SCHEMA_CREATION": StepDefinition(
+        step_id="P6_S4_SCHEMA_CREATION",
+        phase=6,
+        step_number="6.4",
+        name="Schema Creation",
+        step_type=StepType.DETERMINISTIC,
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P6_S2_DDL_VALIDATION", "P6_S3_DDL_ERROR_CORRECTION"],
+        avg_tokens_per_call=0,
+    ),
+    "P6_S5_SQL_GENERATION": StepDefinition(
+        step_id="P6_S5_SQL_GENERATION",
+        phase=6,
+        step_number="6.5",
+        name="SQL Query Generation",
+        step_type=StepType.LLM,
+        call_type=CallType.PER_INFORMATION_NEED,
+        fanout_unit="information_need",
+        can_parallelize=True,
+        dependencies=["P6_S4_SCHEMA_CREATION"],
+        avg_tokens_per_call=4000,
+    ),
+}
+
+
+
+
+# ============================================================================
+# Phase 7: Information Mining
+# ============================================================================
+
+PHASE_7_STEPS: Dict[str, StepDefinition] = {
+    "P7_S1_INFORMATION_NEEDS": StepDefinition(
+        step_id="P7_S1_INFORMATION_NEEDS",
+        phase=7,
+        step_number="7.1",
         name="Information Need Identification",
         step_type=StepType.LLM,
         call_type=CallType.LOOP,
@@ -364,231 +542,69 @@ PHASE_3_STEPS: Dict[str, StepDefinition] = {
         can_parallelize=False,
         is_loop=True,
         max_iters=10,
-        dependencies=["P2_S14_RELATION_REALIZATION"],
+        dependencies=["P6_S4_SCHEMA_CREATION"],
         avg_tokens_per_call=3000,
     ),
-    "P3_S2_INFORMATION_COMPLETENESS": StepDefinition(
-        step_id="P3_S2_INFORMATION_COMPLETENESS",
-        phase=3,
-        step_number="3.2",
-        name="Information Completeness Check",
+    "P7_S2_SQL_VALIDATION": StepDefinition(
+        step_id="P7_S2_SQL_VALIDATION",
+        phase=7,
+        step_number="7.2",
+        name="SQL Generation and Validation",
         step_type=StepType.LLM,
         call_type=CallType.PER_INFORMATION_NEED,
         fanout_unit="information_need",
         can_parallelize=True,
-        is_loop=True,
-        max_iters=5,
-        dependencies=["P3_S1_INFORMATION_NEEDS"],
-        avg_tokens_per_call=2500,
-    ),
-    "P3_S3_PHASE2_REEXECUTION": StepDefinition(
-        step_id="P3_S3_PHASE2_REEXECUTION",
-        phase=3,
-        step_number="3.3",
-        name="Phase 2 Steps with Enhanced Context",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_ENTITY,
-        fanout_unit="entity",
-        can_parallelize=True,
-        dependencies=["P3_S2_INFORMATION_COMPLETENESS"],
-        avg_tokens_per_call=2000,
-    ),
-    "P3_S4_ER_COMPILATION": StepDefinition(
-        step_id="P3_S4_ER_COMPILATION",
-        phase=3,
-        step_number="3.4",
-        name="ER Design Compilation",
-        step_type=StepType.DETERMINISTIC,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P3_S3_PHASE2_REEXECUTION"],
-        avg_tokens_per_call=0,
-    ),
-    "P3_S5_RELATIONAL_SCHEMA": StepDefinition(
-        step_id="P3_S5_RELATIONAL_SCHEMA",
-        phase=3,
-        step_number="3.5",
-        name="Relational Schema Compilation",
-        step_type=StepType.DETERMINISTIC,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P3_S4_ER_COMPILATION"],
-        avg_tokens_per_call=0,
-    ),
-}
-
-
-# ============================================================================
-# Phase 4: Functional Dependencies & Data Types
-# ============================================================================
-
-PHASE_4_STEPS: Dict[str, StepDefinition] = {
-    "P4_S1_FUNCTIONAL_DEPENDENCIES": StepDefinition(
-        step_id="P4_S1_FUNCTIONAL_DEPENDENCIES",
-        phase=4,
-        step_number="4.1",
-        name="Functional Dependency Analysis",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_ENTITY,
-        fanout_unit="entity",
-        can_parallelize=True,
-        dependencies=["P3_S5_RELATIONAL_SCHEMA"],
-        avg_tokens_per_call=3000,
-    ),
-    "P4_S2_3NF_NORMALIZATION": StepDefinition(
-        step_id="P4_S2_3NF_NORMALIZATION",
-        phase=4,
-        step_number="4.2",
-        name="3NF Normalization",
-        step_type=StepType.DETERMINISTIC,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P4_S1_FUNCTIONAL_DEPENDENCIES", "P3_S5_RELATIONAL_SCHEMA"],
-        avg_tokens_per_call=0,
-    ),
-    "P4_S3_DATA_TYPE_ASSIGNMENT": StepDefinition(
-        step_id="P4_S3_DATA_TYPE_ASSIGNMENT",
-        phase=4,
-        step_number="4.3",
-        name="Data Type Assignment",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_ENTITY,
-        fanout_unit="entity",
-        can_parallelize=True,
-        dependencies=["P4_S2_3NF_NORMALIZATION"],
-        avg_tokens_per_call=2500,
-    ),
-    "P4_S4_CATEGORICAL_DETECTION": StepDefinition(
-        step_id="P4_S4_CATEGORICAL_DETECTION",
-        phase=4,
-        step_number="4.4",
-        name="Categorical Detection",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_ENTITY,
-        fanout_unit="entity",
-        can_parallelize=True,
-        dependencies=["P4_S3_DATA_TYPE_ASSIGNMENT"],
-        avg_tokens_per_call=1500,
-    ),
-    "P4_S5_CHECK_CONSTRAINT_DETECTION": StepDefinition(
-        step_id="P4_S5_CHECK_CONSTRAINT_DETECTION",
-        phase=4,
-        step_number="4.5",
-        name="Check Constraint Detection",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_CATEGORICAL_ATTRIBUTE,
-        fanout_unit="categorical_attribute",
-        can_parallelize=True,
-        dependencies=["P4_S4_CATEGORICAL_DETECTION"],
-        avg_tokens_per_call=1200,
-    ),
-    "P4_S6_CATEGORICAL_VALUES": StepDefinition(
-        step_id="P4_S6_CATEGORICAL_VALUES",
-        phase=4,
-        step_number="4.6",
-        name="Categorical Value Extraction",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_CATEGORICAL_ATTRIBUTE,
-        fanout_unit="categorical_attribute",
-        can_parallelize=True,
-        dependencies=["P4_S4_CATEGORICAL_DETECTION"],
-        avg_tokens_per_call=1500,
-    ),
-    "P4_S7_CATEGORICAL_DISTRIBUTION": StepDefinition(
-        step_id="P4_S7_CATEGORICAL_DISTRIBUTION",
-        phase=4,
-        step_number="4.7",
-        name="Categorical Distribution",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_CATEGORICAL_ATTRIBUTE,
-        fanout_unit="categorical_attribute",
-        can_parallelize=True,
-        dependencies=["P4_S6_CATEGORICAL_VALUES"],
-        avg_tokens_per_call=1500,
-    ),
-}
-
-
-# ============================================================================
-# Phase 5: DDL & SQL Generation
-# ============================================================================
-
-PHASE_5_STEPS: Dict[str, StepDefinition] = {
-    "P5_S1_DDL_COMPILATION": StepDefinition(
-        step_id="P5_S1_DDL_COMPILATION",
-        phase=5,
-        step_number="5.1",
-        name="DDL Compilation",
-        step_type=StepType.DETERMINISTIC,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P4_S2_3NF_NORMALIZATION"],
-        avg_tokens_per_call=0,
-    ),
-    "P5_S2_DDL_VALIDATION": StepDefinition(
-        step_id="P5_S2_DDL_VALIDATION",
-        phase=5,
-        step_number="5.2",
-        name="DDL Validation",
-        step_type=StepType.DETERMINISTIC,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P5_S1_DDL_COMPILATION"],
-        avg_tokens_per_call=0,
-    ),
-    "P5_S3_DDL_ERROR_CORRECTION": StepDefinition(
-        step_id="P5_S3_DDL_ERROR_CORRECTION",
-        phase=5,
-        step_number="5.3",
-        name="DDL Error Correction",
-        step_type=StepType.LLM,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P5_S2_DDL_VALIDATION"],
-        avg_tokens_per_call=3000,
-    ),
-    "P5_S4_SCHEMA_CREATION": StepDefinition(
-        step_id="P5_S4_SCHEMA_CREATION",
-        phase=5,
-        step_number="5.4",
-        name="Schema Creation",
-        step_type=StepType.DETERMINISTIC,
-        call_type=CallType.SINGULAR,
-        fanout_unit="",
-        can_parallelize=False,
-        dependencies=["P5_S2_DDL_VALIDATION", "P5_S3_DDL_ERROR_CORRECTION"],
-        avg_tokens_per_call=0,
-    ),
-    "P5_S5_SQL_GENERATION": StepDefinition(
-        step_id="P5_S5_SQL_GENERATION",
-        phase=5,
-        step_number="5.5",
-        name="SQL Query Generation",
-        step_type=StepType.LLM,
-        call_type=CallType.PER_INFORMATION_NEED,
-        fanout_unit="information_need",
-        can_parallelize=True,
-        dependencies=["P3_S1_INFORMATION_NEEDS", "P4_S2_3NF_NORMALIZATION"],
+        dependencies=["P7_S1_INFORMATION_NEEDS"],
         avg_tokens_per_call=4000,
     ),
 }
 
 
 # ============================================================================
-# Phase 6: Constraints & Distributions
+# Phase 8: Functional Dependencies & Constraints
 # ============================================================================
 
-PHASE_6_STEPS: Dict[str, StepDefinition] = {
-    "P6_S1_CONSTRAINT_DETECTION": StepDefinition(
-        step_id="P6_S1_CONSTRAINT_DETECTION",
-        phase=6,
-        step_number="6.1",
+PHASE_8_STEPS: Dict[str, StepDefinition] = {
+    "P8_S1_FUNCTIONAL_DEPENDENCIES": StepDefinition(
+        step_id="P8_S1_FUNCTIONAL_DEPENDENCIES",
+        phase=8,
+        step_number="8.1",
+        name="Functional Dependency Analysis",
+        step_type=StepType.LLM,
+        call_type=CallType.PER_ENTITY,
+        fanout_unit="entity",
+        can_parallelize=True,
+        dependencies=["P6_S4_SCHEMA_CREATION"],
+        avg_tokens_per_call=3000,
+    ),
+    "P8_S2_CATEGORICAL_IDENTIFICATION": StepDefinition(
+        step_id="P8_S2_CATEGORICAL_IDENTIFICATION",
+        phase=8,
+        step_number="8.2",
+        name="Categorical Column Identification",
+        step_type=StepType.LLM,
+        call_type=CallType.PER_ENTITY,
+        fanout_unit="entity",
+        can_parallelize=True,
+        dependencies=["P8_S1_FUNCTIONAL_DEPENDENCIES"],
+        avg_tokens_per_call=1500,
+    ),
+    "P8_S3_CATEGORICAL_VALUES": StepDefinition(
+        step_id="P8_S3_CATEGORICAL_VALUES",
+        phase=8,
+        step_number="8.3",
+        name="Categorical Value Identification",
+        step_type=StepType.LLM,
+        call_type=CallType.PER_CATEGORICAL_ATTRIBUTE,
+        fanout_unit="categorical_attribute",
+        can_parallelize=True,
+        dependencies=["P8_S2_CATEGORICAL_IDENTIFICATION"],
+        avg_tokens_per_call=1500,
+    ),
+    "P8_S4_CONSTRAINT_DETECTION": StepDefinition(
+        step_id="P8_S4_CONSTRAINT_DETECTION",
+        phase=8,
+        step_number="8.4",
         name="Constraint Detection",
         step_type=StepType.LLM,
         call_type=CallType.LOOP,
@@ -596,105 +612,105 @@ PHASE_6_STEPS: Dict[str, StepDefinition] = {
         can_parallelize=False,
         is_loop=True,
         max_iters=10,
-        dependencies=["P4_S2_3NF_NORMALIZATION"],
+        dependencies=["P8_S3_CATEGORICAL_VALUES"],
         avg_tokens_per_call=3000,
     ),
-    "P6_S2_CONSTRAINT_SCOPE": StepDefinition(
-        step_id="P6_S2_CONSTRAINT_SCOPE",
-        phase=6,
-        step_number="6.2",
+    "P8_S5_CONSTRAINT_SCOPE": StepDefinition(
+        step_id="P8_S5_CONSTRAINT_SCOPE",
+        phase=8,
+        step_number="8.5",
         name="Constraint Scope Analysis",
         step_type=StepType.LLM,
         call_type=CallType.PER_CONSTRAINT,
         fanout_unit="constraint",
         can_parallelize=True,
-        dependencies=["P6_S1_CONSTRAINT_DETECTION"],
+        dependencies=["P8_S4_CONSTRAINT_DETECTION"],
         avg_tokens_per_call=2500,
     ),
-    "P6_S3_CONSTRAINT_ENFORCEMENT": StepDefinition(
-        step_id="P6_S3_CONSTRAINT_ENFORCEMENT",
-        phase=6,
-        step_number="6.3",
+    "P8_S6_CONSTRAINT_ENFORCEMENT": StepDefinition(
+        step_id="P8_S6_CONSTRAINT_ENFORCEMENT",
+        phase=8,
+        step_number="8.6",
         name="Constraint Enforcement Strategy",
         step_type=StepType.LLM,
         call_type=CallType.PER_CONSTRAINT,
         fanout_unit="constraint",
         can_parallelize=True,
-        dependencies=["P6_S2_CONSTRAINT_SCOPE"],
+        dependencies=["P8_S5_CONSTRAINT_SCOPE"],
         avg_tokens_per_call=2500,
     ),
-    "P6_S4_CONSTRAINT_CONFLICT": StepDefinition(
-        step_id="P6_S4_CONSTRAINT_CONFLICT",
-        phase=6,
-        step_number="6.4",
+    "P8_S7_CONSTRAINT_CONFLICT": StepDefinition(
+        step_id="P8_S7_CONSTRAINT_CONFLICT",
+        phase=8,
+        step_number="8.7",
         name="Constraint Conflict Detection",
         step_type=StepType.DETERMINISTIC,
         call_type=CallType.SINGULAR,
         fanout_unit="",
         can_parallelize=False,
-        dependencies=["P6_S3_CONSTRAINT_ENFORCEMENT"],
+        dependencies=["P8_S6_CONSTRAINT_ENFORCEMENT"],
         avg_tokens_per_call=0,
     ),
-    "P6_S5_CONSTRAINT_COMPILATION": StepDefinition(
-        step_id="P6_S5_CONSTRAINT_COMPILATION",
-        phase=6,
-        step_number="6.5",
-        name="Statistical Constraint Compilation",
+    "P8_S8_CONSTRAINT_COMPILATION": StepDefinition(
+        step_id="P8_S8_CONSTRAINT_COMPILATION",
+        phase=8,
+        step_number="8.8",
+        name="Constraint Compilation",
         step_type=StepType.DETERMINISTIC,
         call_type=CallType.SINGULAR,
         fanout_unit="",
         can_parallelize=False,
-        dependencies=["P6_S4_CONSTRAINT_CONFLICT"],
+        dependencies=["P8_S7_CONSTRAINT_CONFLICT"],
         avg_tokens_per_call=0,
     ),
 }
 
 
 # ============================================================================
-# Phase 7: Generation Strategies
+# Phase 9: Generation Strategies
 # ============================================================================
 
-PHASE_7_STEPS: Dict[str, StepDefinition] = {
-    "P7_S1_NUMERICAL_RANGE": StepDefinition(
-        step_id="P7_S1_NUMERICAL_RANGE",
-        phase=7,
-        step_number="7.1",
+PHASE_9_STEPS: Dict[str, StepDefinition] = {
+    "P9_S1_NUMERICAL_RANGE": StepDefinition(
+        step_id="P9_S1_NUMERICAL_RANGE",
+        phase=9,
+        step_number="9.1",
         name="Numerical Range Definition",
         step_type=StepType.LLM,
-        call_type=CallType.PER_NUMERIC_ATTRIBUTE,
-        fanout_unit="numeric_attribute",
-        can_parallelize=True,
-        dependencies=["P4_S3_DATA_TYPE_ASSIGNMENT"],
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P8_S8_CONSTRAINT_COMPILATION"],
         avg_tokens_per_call=2000,
     ),
-    "P7_S2_TEXT_GEN_STRATEGY": StepDefinition(
-        step_id="P7_S2_TEXT_GEN_STRATEGY",
-        phase=7,
-        step_number="7.2",
+    "P9_S2_TEXT_GEN_STRATEGY": StepDefinition(
+        step_id="P9_S2_TEXT_GEN_STRATEGY",
+        phase=9,
+        step_number="9.2",
         name="Text Generation Strategy",
         step_type=StepType.LLM,
-        call_type=CallType.PER_TEXT_ATTRIBUTE,
-        fanout_unit="text_attribute",
-        can_parallelize=True,
-        dependencies=["P4_S3_DATA_TYPE_ASSIGNMENT"],
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P9_S1_NUMERICAL_RANGE"],
         avg_tokens_per_call=1500,
     ),
-    "P7_S3_BOOLEAN_DEPENDENCY": StepDefinition(
-        step_id="P7_S3_BOOLEAN_DEPENDENCY",
-        phase=7,
-        step_number="7.3",
+    "P9_S3_BOOLEAN_DEPENDENCY": StepDefinition(
+        step_id="P9_S3_BOOLEAN_DEPENDENCY",
+        phase=9,
+        step_number="9.3",
         name="Boolean Dependency Analysis",
         step_type=StepType.LLM,
-        call_type=CallType.PER_BOOLEAN_ATTRIBUTE,
-        fanout_unit="boolean_attribute",
-        can_parallelize=True,
-        dependencies=["P4_S3_DATA_TYPE_ASSIGNMENT"],
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P9_S2_TEXT_GEN_STRATEGY"],
         avg_tokens_per_call=1500,
     ),
-    "P7_S4_DATA_VOLUME": StepDefinition(
-        step_id="P7_S4_DATA_VOLUME",
-        phase=7,
-        step_number="7.4",
+    "P9_S4_DATA_VOLUME": StepDefinition(
+        step_id="P9_S4_DATA_VOLUME",
+        phase=9,
+        step_number="9.4",
         name="Data Volume Specifications",
         step_type=StepType.LLM,
         call_type=CallType.SINGULAR,
@@ -703,28 +719,28 @@ PHASE_7_STEPS: Dict[str, StepDefinition] = {
         dependencies=["P1_S8_ENTITY_CARDINALITY"],
         avg_tokens_per_call=2000,
     ),
-    "P7_S5_PARTITIONING": StepDefinition(
-        step_id="P7_S5_PARTITIONING",
-        phase=7,
-        step_number="7.5",
+    "P9_S5_PARTITIONING": StepDefinition(
+        step_id="P9_S5_PARTITIONING",
+        phase=9,
+        step_number="9.5",
         name="Partitioning Strategy",
         step_type=StepType.LLM,
-        call_type=CallType.PER_ENTITY,
-        fanout_unit="entity",
-        can_parallelize=True,
-        dependencies=["P7_S4_DATA_VOLUME"],
+        call_type=CallType.SINGULAR,
+        fanout_unit="",
+        can_parallelize=False,
+        dependencies=["P9_S4_DATA_VOLUME"],
         avg_tokens_per_call=2000,
     ),
-    "P7_S6_DISTRIBUTION_COMPILATION": StepDefinition(
-        step_id="P7_S6_DISTRIBUTION_COMPILATION",
-        phase=7,
-        step_number="7.6",
+    "P9_S6_DISTRIBUTION_COMPILATION": StepDefinition(
+        step_id="P9_S6_DISTRIBUTION_COMPILATION",
+        phase=9,
+        step_number="9.6",
         name="Distribution Compilation",
         step_type=StepType.DETERMINISTIC,
         call_type=CallType.SINGULAR,
         fanout_unit="",
         can_parallelize=False,
-        dependencies=["P7_S1_NUMERICAL_RANGE", "P7_S2_TEXT_GEN_STRATEGY", "P7_S3_BOOLEAN_DEPENDENCY"],
+        dependencies=["P9_S1_NUMERICAL_RANGE", "P9_S2_TEXT_GEN_STRATEGY", "P9_S3_BOOLEAN_DEPENDENCY", "P9_S5_PARTITIONING"],
         avg_tokens_per_call=0,
     ),
 }
@@ -742,6 +758,8 @@ STEP_REGISTRY: Dict[str, StepDefinition] = {
     **PHASE_5_STEPS,
     **PHASE_6_STEPS,
     **PHASE_7_STEPS,
+    **PHASE_8_STEPS,
+    **PHASE_9_STEPS,
 }
 
 

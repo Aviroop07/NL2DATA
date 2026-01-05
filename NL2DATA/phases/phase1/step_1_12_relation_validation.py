@@ -6,13 +6,14 @@ Note: Circular dependencies are not checked in Phase 1 (they belong in Phase 4 w
 
 import json
 import re
-from typing import Dict, Any, List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.phases.phase1.utils import (
     extract_entity_name,
     build_entity_list_string,
@@ -126,12 +127,12 @@ def _pick_best_constraints_for_relation(
 
 @traceable_step("1.12", phase=1, tags=["relation_validation"])
 async def step_1_12_relation_validation(
-    entities: List[Dict[str, Any]],
-    relations: List[Dict[str, Any]],
-    relation_cardinalities: Optional[List[Dict[str, Any]]] = None,
+    entities: List,
+    relations: List,
+    relation_cardinalities: Optional[List] = None,
     nl_description: Optional[str] = None,
-    previous_result: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    previous_result: Optional = None,
+) -> RelationValidationOutput:
     """
     Step 1.12: Validate relations for logical errors.
     
@@ -227,6 +228,15 @@ async def step_1_12_relation_validation(
         include_participations=participation_map if participation_map else None,
     )
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=RelationValidationOutput,
+        additional_requirements=[
+            "All list items must be STRINGS, not objects (e.g., impossible_cardinalities and conflicts are lists of strings)",
+            "Reasoning is REQUIRED and cannot be omitted"
+        ]
+    )
+    
     # System prompt
     system_prompt = """You are a database design assistant. Your task is to validate relationships in a database schema for logical errors and inconsistencies.
 
@@ -264,13 +274,7 @@ You have access to validation tools:
 
 Use these tools to validate your analysis before finalizing your response.
 
-CRITICAL: You MUST return ONLY valid JSON. Do NOT include any markdown formatting, explanations, or text outside the JSON object.
-
-Provide your response as a JSON object with:
-- impossible_cardinalities: List of strings describing relations with impossible cardinalities. Format each as: "Entity1, Entity2: description of issue". Empty array if none.
-- conflicts: List of strings describing conflicting relationship types. Format each as: "Entity1, Entity2: description of conflict". Empty array if none.
-- validation_passed: true if no issues found, false otherwise
-- reasoning: REQUIRED - String with clear explanation of validation results (cannot be omitted)
+""" + output_structure_section + """
 
 IMPORTANT: All list items must be STRINGS, not objects. For example:
 - CORRECT: "impossible_cardinalities": ["Sensor, SensorReading: cardinalities are missing"]
@@ -369,40 +373,32 @@ Original description (if available):
         if conflicts:
             reasoning_lines.append(f"conflicts: {conflicts[:5]}")
 
-    result_dict = {
-        "impossible_cardinalities": impossible,
-        "conflicts": conflicts,
-        "validation_passed": validation_passed,
-        "reasoning": "\n".join(reasoning_lines),
-    }
+    result = RelationValidationOutput(
+        impossible_cardinalities=impossible,
+        conflicts=conflicts,
+        validation_passed=validation_passed,
+        reasoning="\n".join(reasoning_lines),
+    )
     
-    # Work with result_dict for logging (already converted from Pydantic model)
-    validation_passed = result_dict.get("validation_passed", False)
-    impossible_count = len(result_dict.get("impossible_cardinalities", []))
-    conflict_count = len(result_dict.get("conflicts", []))
-    
-    if validation_passed:
+    # Work with Pydantic model for logging
+    if result.validation_passed:
         logger.info("Relation validation passed - no issues found")
     else:
         logger.warning(
-            f"Relation validation found issues: {impossible_count} impossible cardinalities, {conflict_count} conflicts"
+            f"Relation validation found issues: {len(result.impossible_cardinalities)} impossible cardinalities, {len(result.conflicts)} conflicts"
         )
     
-    # Add iteration info for loop tracking
-    result_dict["iteration"] = iteration_num
-    result_dict["needs_loop"] = not result_dict.get("validation_passed", False)
-    
-    return result_dict
+    return result
 
 
 async def step_1_12_relation_validation_with_loop(
-    entities: List[Dict[str, Any]],
-    relations: List[Dict[str, Any]],
-    relation_cardinalities: Optional[List[Dict[str, Any]]] = None,
+    entities: List,
+    relations: List,
+    relation_cardinalities: Optional[List] = None,
     nl_description: Optional[str] = None,
     max_iterations: int = 3,
     max_time_sec: int = 180,
-) -> Dict[str, Any]:
+):
     """
     Step 1.12 with automatic looping: loops back to relation extraction if validation fails.
     
@@ -515,11 +511,14 @@ async def step_1_12_relation_validation_with_loop(
     final_result = loop_result["result"]
     
     # If validation still fails after loop, log warning
-    if not final_result.get("validation_passed", False):
+    validation_passed = final_result.validation_passed if hasattr(final_result, 'validation_passed') else (final_result.get("validation_passed", False) if isinstance(final_result, dict) else False)
+    if not validation_passed:
+        impossible_count = len(final_result.impossible_cardinalities) if hasattr(final_result, 'impossible_cardinalities') else (len(final_result.get('impossible_cardinalities', [])) if isinstance(final_result, dict) else 0)
+        conflict_count = len(final_result.conflicts) if hasattr(final_result, 'conflicts') else (len(final_result.get('conflicts', [])) if isinstance(final_result, dict) else 0)
         logger.warning(
             f"Relation validation failed after {loop_result['iterations']} iterations. "
-            f"Issues found: {len(final_result.get('impossible_cardinalities', []))} impossible cardinalities, "
-            f"{len(final_result.get('conflicts', []))} conflicts. "
+            f"Issues found: {impossible_count} impossible cardinalities, "
+            f"{conflict_count} conflicts. "
             f"Consider manual review."
         )
     else:
@@ -528,7 +527,7 @@ async def step_1_12_relation_validation_with_loop(
         )
     
     return {
-        "final_result": final_result,
+        "final_result": final_result.model_dump() if hasattr(final_result, 'model_dump') else final_result,
         "loop_metadata": {
             "iterations": loop_result["iterations"],
             "terminated_by": loop_result["terminated_by"],

@@ -4,20 +4,27 @@ For composite attributes like "address", determines if they should be one field
 or decomposed (street, city, zip). Affects normalization and queryability.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from NL2DATA.phases.phase2.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.utils.pipeline_config import get_phase2_config
 from NL2DATA.utils.dsl.validator import validate_dsl_expression
 from NL2DATA.utils.dsl.analysis import dsl_identifiers_used
 from NL2DATA.utils.dsl.prompt_spec import dsl_prompt_spec_text
 
 logger = get_logger(__name__)
+
+
+class DecompositionDslInfo(BaseModel):
+    """DSL expression for a decomposed sub-attribute."""
+    sub_attribute_name: str = Field(description="Name of the sub-attribute")
+    dsl_expression: str = Field(description="DSL expression that derives this sub-attribute from the composite attribute")
 
 
 class CompositeAttributeInfo(BaseModel):
@@ -28,11 +35,18 @@ class CompositeAttributeInfo(BaseModel):
         default=None,
         description="List of sub-attribute names if should_decompose is True (e.g., ['street', 'city', 'zip'] for 'address')"
     )
-    decomposition_dsls: Optional[Dict[str, str]] = Field(
+    decomposition_dsls: Optional[List[DecompositionDslInfo]] = Field(
         default=None,
-        description="If should_decompose is True, map each sub-attribute name to a DSL expression that derives it ONLY from the original composite attribute."
+        description=(
+            "If should_decompose is True, list of DSL expressions for decomposed sub-attributes. "
+            "Each DSL expression must derive the sub-attribute ONLY from the original composite attribute. "
+            "Example: [{'sub_attribute_name': 'street', 'dsl_expression': 'split(address, ',')[0]'}, ...]"
+        )
     )
-    reasoning: str = Field(description="Reasoning for decomposition decision")
+    reasoning: Optional[str] = Field(
+        default="",
+        description="Reasoning for decomposition decision"
+    )
 
 
 class CompositeAttributeOutput(BaseModel):
@@ -47,7 +61,7 @@ def _validate_decomposition_dsls(
     *,
     composite_attr: str,
     decomposition: List[str],
-    decomposition_dsls: Optional[Dict[str, str]],
+    decomposition_dsls: Optional[List[DecompositionDslInfo]],
 ) -> List[str]:
     """Deterministically validate decomposition DSLs.
 
@@ -60,15 +74,20 @@ def _validate_decomposition_dsls(
     issues: List[str] = []
     if not decomposition:
         return issues
-    if not decomposition_dsls or not isinstance(decomposition_dsls, dict):
+    if not decomposition_dsls or not isinstance(decomposition_dsls, list):
         return [f"Missing decomposition_dsls for composite attribute '{composite_attr}'"]
 
-    missing = [s for s in decomposition if s not in decomposition_dsls]
+    # Build mapping from sub-attribute name to DSL expression
+    dsl_map = {dsl.sub_attribute_name: dsl.dsl_expression for dsl in decomposition_dsls if dsl.sub_attribute_name}
+    
+    missing = [s for s in decomposition if s not in dsl_map]
     if missing:
         issues.append(f"Missing DSL for decomposed sub-attributes: {missing}")
 
     for sub_attr in decomposition:
-        expr = (decomposition_dsls.get(sub_attr) or "").strip()
+        if sub_attr not in dsl_map:
+            continue
+        expr = (dsl_map[sub_attr] or "").strip()
         if not expr:
             issues.append(f"Empty DSL for sub-attribute '{sub_attr}'")
             continue
@@ -93,9 +112,9 @@ def _validate_decomposition_dsls(
 @traceable_step("2.4", phase=2, tags=['phase_2_step_4'])
 async def step_2_4_composite_attribute_handling(
     entity_name: str,
-    attributes: List[Dict[str, Any]],
+    attributes: List,
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> CompositeAttributeOutput:
     """
     Step 2.4 (per-entity): Determine if composite attributes should be decomposed.
     
@@ -124,7 +143,7 @@ async def step_2_4_composite_attribute_handling(
     
     if not attributes:
         logger.debug(f"No attributes provided for entity {entity_name}")
-        return {"composite_attributes": []}
+        return CompositeAttributeOutput(composite_attributes=[])
     
     # Build attribute list for prompt
     attribute_list_str = ""
@@ -133,6 +152,16 @@ async def step_2_4_composite_attribute_handling(
         attribute_list_str += f"{i}. {attr_name}\n"
     
     dsl_spec = dsl_prompt_spec_text(include_examples=True)
+
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=CompositeAttributeOutput,
+        additional_requirements=[
+            "If should_decompose=true, decomposition MUST contain at least 2 sub-attributes",
+            "If should_decompose=true, decomposition_dsls MUST provide a DSL expression for every decomposed sub-attribute",
+            "Each DSL expression must reference ONLY the composite attribute name (no other identifiers)"
+        ]
+    )
 
     # System prompt
     system_prompt = """You are a database design assistant. Your task is to identify composite attributes and determine if they should be decomposed into sub-attributes.
@@ -149,25 +178,19 @@ Decomposition decision factors:
 3. **Simplicity**: Is the composite simple enough to keep as one? (e.g., "full_name" might stay as one field)
 4. **Domain patterns**: What's standard in this domain? (e.g., addresses are usually decomposed)
 
-For each composite attribute, provide:
-- name: The composite attribute name
-- should_decompose: Whether to decompose (true) or keep as one field (false)
-- decomposition: List of sub-attribute names if should_decompose is True (e.g., ["street", "city", "zip"] for address)
-- decomposition_dsls: If should_decompose is True, you MUST provide a DSL expression for EACH decomposed sub-attribute.
-  Each DSL expression MUST derive the sub-attribute ONLY from the original composite attribute (the attribute named in `name`).
-- reasoning: REQUIRED - Clear explanation of the decision (cannot be omitted)
+""" + output_structure_section + """
+
+DSL constraints (strict):
+- The DSL must follow the provided NL2DATA DSL spec exactly
+- Do NOT invent functions or syntax
+- Do NOT use dotted identifiers - only use bare attribute names
+- For decomposition DSLs: the ONLY allowed identifier is the composite attribute itself (e.g., address)
 
 Important:
 - Only identify attributes that are truly composite (can be broken down)
 - Consider query needs: if users will filter/sort by sub-components, decompose
 - Consider normalization: if decomposition helps avoid redundancy, decompose
 - Be practical: don't over-decompose simple attributes
-
-DSL constraints (strict):
-- The DSL must follow the provided NL2DATA DSL spec exactly.
-- Do NOT invent functions or syntax.
-- Do NOT use dotted identifiers. Only use bare attribute names.
-- For decomposition DSLS: the ONLY allowed identifier is the composite attribute itself (e.g., address).
 """
     # Put DSL spec in the SYSTEM message (user request) so it is always authoritative.
     system_prompt = system_prompt + "\n\n" + dsl_spec
@@ -238,21 +261,7 @@ IMPORTANT:
             feedback = "\n".join(f"- {x}" for x in issues)
 
         if last is None:
-            return {"composite_attributes": [], "composite_decompositions": {}}
-
-        # Build a compact mapping for state consumption:
-        # entity -> composite_attr -> sub_attr -> dsl
-        composite_decompositions: Dict[str, Dict[str, Dict[str, str]]] = {}
-        entity_map: Dict[str, Dict[str, str]] = {}
-        for ca in last.composite_attributes:
-            if not ca.should_decompose:
-                continue
-            if not ca.decomposition or not ca.decomposition_dsls:
-                continue
-            sub_map = {k: v for k, v in (ca.decomposition_dsls or {}).items() if isinstance(k, str) and isinstance(v, str)}
-            if sub_map:
-                entity_map[ca.name] = sub_map
-        composite_decompositions[entity_name] = entity_map
+            return CompositeAttributeOutput(composite_attributes=[])
         
         # Work with Pydantic model directly
         composite_count = len(last.composite_attributes)
@@ -261,21 +270,32 @@ IMPORTANT:
             f"Entity {entity_name}: {composite_count} composite attributes identified"
         )
         
-        # Convert to dict only at return boundary
-        out = last.model_dump()
-        out["composite_decompositions"] = composite_decompositions
-        return out
+        return last
         
     except Exception as e:
-        logger.error(f"Error handling composite attributes for entity {entity_name}: {e}", exc_info=True)
-        raise
+        # Fail-open per entity: return empty composite attributes rather than crashing
+        logger.warning(
+            f"Error handling composite attributes for entity {entity_name}: {e}. "
+            f"Failing open with empty composite attributes."
+        )
+        return CompositeAttributeOutput(composite_attributes=[])
+
+
+class CompositeAttributeBatchOutput(BaseModel):
+    """Output structure for Step 2.4 batch processing."""
+    entity_results: List[CompositeAttributeOutput] = Field(
+        description="List of composite attribute handling results, one per entity"
+    )
+    total_entities: int = Field(
+        description="Total number of entities processed"
+    )
 
 
 async def step_2_4_composite_attribute_handling_batch(
-    entities: List[Dict[str, Any]],
-    entity_attributes: Dict[str, List[str]],  # entity_name -> final attribute list (strings)
+    entities: List,
+    entity_attributes: dict,  # entity_name -> final attribute list (strings)
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> CompositeAttributeBatchOutput:
     """
     Step 2.4: Handle composite attributes for all entities (parallel execution).
     
@@ -285,21 +305,21 @@ async def step_2_4_composite_attribute_handling_batch(
         nl_description: Optional original NL description
         
     Returns:
-        dict: Composite attribute handling results for all entities, keyed by entity name
+        CompositeAttributeBatchOutput: Composite attribute handling results for all entities
         
     Example:
         >>> result = await step_2_4_composite_attribute_handling_batch(
         ...     entities=[{"name": "Customer"}],
         ...     entity_attributes={"Customer": ["name", "address", "email"]}
         ... )
-        >>> "Customer" in result["entity_results"]
-        True
+        >>> len(result.entity_results)
+        1
     """
     logger.info(f"Starting Step 2.4: Composite Attribute Handling for {len(entities)} entities")
     
     if not entities:
         logger.warning("No entities provided for composite attribute handling")
-        return {"entity_results": {}}
+        return CompositeAttributeBatchOutput(entity_results=[], total_entities=0)
     
     # Execute in parallel for all entities
     import asyncio
@@ -317,29 +337,28 @@ async def step_2_4_composite_attribute_handling_batch(
             attributes=attr_dicts,
             nl_description=nl_description,
         )
-        tasks.append((entity_name, task))
+        tasks.append(task)
     
     # Wait for all tasks to complete
     results = await asyncio.gather(
-        *[task for _, task in tasks],
+        *tasks,
         return_exceptions=True
     )
     
     # Process results
-    entity_results = {}
-    composite_decompositions: Dict[str, Any] = {}
-    for i, ((entity_name, _), result) in enumerate(zip(tasks, results)):
+    entity_results_list = []
+    for result in results:
         if isinstance(result, Exception):
-            logger.error(f"Error processing entity {entity_name}: {result}")
-            entity_results[entity_name] = {"composite_attributes": []}
+            logger.error(f"Error processing entity: {result}")
+            entity_results_list.append(CompositeAttributeOutput(composite_attributes=[]))
         else:
-            entity_results[entity_name] = result
-            if isinstance(result, dict) and result.get("composite_decompositions"):
-                # merge entity-level mapping
-                composite_decompositions.update(result.get("composite_decompositions") or {})
+            entity_results_list.append(result)
     
-    total_composite = sum(len(r.get("composite_attributes", [])) for r in entity_results.values())
-    logger.info(f"Composite attribute handling completed: {total_composite} composite attributes identified across {len(entity_results)} entities")
+    total_composite = sum(len(r.composite_attributes) for r in entity_results_list)
+    logger.info(f"Composite attribute handling completed: {total_composite} composite attributes identified across {len(entity_results_list)} entities")
     
-    return {"entity_results": entity_results, "composite_decompositions": composite_decompositions}
+    return CompositeAttributeBatchOutput(
+        entity_results=entity_results_list,
+        total_entities=len(entities),
+    )
 

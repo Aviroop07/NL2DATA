@@ -3,7 +3,7 @@
 Determines relationship cardinality (1 or N) and participation (total or partial) for each entity in the relation.
 """
 
-from typing import Dict, Any, List, Optional, Literal, Tuple
+from typing import List, Optional, Literal, Tuple, Dict, Any
 import re
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -11,6 +11,8 @@ from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
+from NL2DATA.utils.llm.json_schema_fix import OpenAICompatibleJsonSchema
 from NL2DATA.phases.phase1.utils import (
     extract_entity_name,
     build_entity_list_string,
@@ -22,18 +24,32 @@ from NL2DATA.phases.phase1.utils import (
 logger = get_logger(__name__)
 
 
+class EntityCardinalityEntry(BaseModel):
+    entity_name: str = Field(description="Name of the entity")
+    cardinality: Literal["1", "N"] = Field(description="Cardinality in the relation: '1' for one, 'N' for many")
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntityParticipationEntry(BaseModel):
+    entity_name: str = Field(description="Name of the entity")
+    participation: Literal["total", "partial"] = Field(description="Participation type: 'total' means every instance must participate, 'partial' means some instances may not participate")
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class RelationCardinalityOutput(BaseModel):
     """Output structure for relation cardinality and participation."""
     # NOTE: These are intentionally REQUIRED (no defaults).
     # If the LLM omits them, we want schema validation to fail loudly rather than quietly
     # accepting {} and only failing later during deterministic completeness checks.
-    entity_cardinalities: Dict[str, Literal["1", "N"]] = Field(
+    entity_cardinalities: List[EntityCardinalityEntry] = Field(
         ...,
-        description="Dictionary mapping entity names to their cardinality in the relation ('1' for one, 'N' for many). Keys MUST match the entity names exactly."
+        description="List of entity cardinality entries, one per entity in the relation. Each entry maps an entity name to its cardinality ('1' for one, 'N' for many). Entity names MUST match exactly."
     )
-    entity_participations: Dict[str, Literal["total", "partial"]] = Field(
+    entity_participations: List[EntityParticipationEntry] = Field(
         ...,
-        description="Dictionary mapping entity names to their participation type ('total' means every instance must participate, 'partial' means some instances may not participate). Keys MUST match the entity names exactly."
+        description="List of entity participation entries, one per entity in the relation. Each entry maps an entity name to its participation type ('total' means every instance must participate, 'partial' means some instances may not participate). Entity names MUST match exactly."
     )
     reasoning: str = Field(description="Reasoning for the cardinality and participation decisions")
 
@@ -51,15 +67,57 @@ class RelationCardinalityOutputLoose(BaseModel):
 
     We therefore parse loosely, then enforce completeness/allowed values deterministically.
     """
-    entity_cardinalities: Optional[Dict[str, Any]] = None
-    entity_participations: Optional[Dict[str, Any]] = None
+    entity_cardinalities: Optional[List[Dict[str, Any]]] = None
+    entity_participations: Optional[List[Dict[str, Any]]] = None
     reasoning: Optional[str] = None
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"schema_generator": OpenAICompatibleJsonSchema})
 
 
 def _normalize_text(s: str) -> str:
     return " ".join((s or "").strip().split())
+
+
+def _dict_to_cardinality_list(card_dict) -> List[EntityCardinalityEntry]:
+    """Convert dict to list of EntityCardinalityEntry objects."""
+    if isinstance(card_dict, dict):
+        return [EntityCardinalityEntry(entity_name=k, cardinality=v) for k, v in card_dict.items()]
+    elif isinstance(card_dict, list):
+        # Already a list, validate and convert
+        result = []
+        for item in card_dict:
+            if isinstance(item, dict):
+                result.append(EntityCardinalityEntry(**item))
+            elif isinstance(item, EntityCardinalityEntry):
+                result.append(item)
+        return result
+    return []
+
+
+def _dict_to_participation_list(part_dict) -> List[EntityParticipationEntry]:
+    """Convert dict to list of EntityParticipationEntry objects."""
+    if isinstance(part_dict, dict):
+        return [EntityParticipationEntry(entity_name=k, participation=v) for k, v in part_dict.items()]
+    elif isinstance(part_dict, list):
+        # Already a list, validate and convert
+        result = []
+        for item in part_dict:
+            if isinstance(item, dict):
+                result.append(EntityParticipationEntry(**item))
+            elif isinstance(item, EntityParticipationEntry):
+                result.append(item)
+        return result
+    return []
+
+
+def _cardinality_list_to_dict(card_list: List[EntityCardinalityEntry]) -> dict:
+    """Convert list of EntityCardinalityEntry to dict for internal processing."""
+    return {entry.entity_name: entry.cardinality for entry in card_list}
+
+
+def _participation_list_to_dict(part_list: List[EntityParticipationEntry]) -> dict:
+    """Convert list of EntityParticipationEntry to dict for internal processing."""
+    return {entry.entity_name: entry.participation for entry in part_list}
 
 
 def _entity_name_variants(entity_name: str) -> List[str]:
@@ -342,10 +400,10 @@ def _validate_relation_cardinality_output_impl(
 
 @traceable_step("1.11", phase=1, tags=["relation_cardinality"])
 async def step_1_11_relation_cardinality_single(
-    relation: Dict[str, Any],
-    entities: List[Dict[str, Any]],
+    relation,
+    entities: List,
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> RelationCardinalityOutput:
     """
     Step 1.11 (per-relation): Determine cardinality and participation for each entity in a relation.
     
@@ -403,6 +461,19 @@ async def step_1_11_relation_cardinality_single(
         prefix="- ",
     )
     
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=RelationCardinalityOutput,
+        additional_requirements=[
+            "STRICT OUTPUT KEYING: Keys MUST use EXACT entity names from the relation (case-sensitive, CamelCase preserved)",
+            "Do NOT use lowercase keys, snake_case keys, pluralized keys, or synonyms",
+            "Include ALL entities from the relation in BOTH dictionaries (no omissions, no extras)",
+            "Cardinality values MUST be exactly \"1\" or \"N\" (no other values)",
+            "Participation values MUST be exactly \"total\" or \"partial\" (no other values)",
+            "Reasoning is REQUIRED and cannot be omitted or empty"
+        ]
+    )
+    
     # System prompt
     system_prompt = """You are a database design assistant. Your task is to determine the cardinality and participation of each entity participating in a relationship.
 
@@ -420,21 +491,21 @@ Examples:
   - Each order belongs to one customer
   - Not all customers place orders (Customer: partial)
   - Every order must belong to a customer (Order: total)
-  - Result: {{"entity_cardinalities": {{"Customer": "1", "Order": "N"}}, "entity_participations": {{"Customer": "partial", "Order": "total"}}}}
+  - Result: {{"entity_cardinalities": [{{"entity_name": "Customer", "cardinality": "1"}}, {{"entity_name": "Order", "cardinality": "N"}}], "entity_participations": [{{"entity_name": "Customer", "participation": "partial"}}, {{"entity_name": "Order", "participation": "total"}}], "reasoning": "One-to-many relationship..."}}
 
 - **Many-to-Many (N:M)**: Student (N, partial) - Course (N, partial)
   - Many students can enroll in many courses
   - Each course can have many students
   - Not all students enroll in all courses (Student: partial)
   - Not all courses have students enrolled (Course: partial)
-  - Result: {{"entity_cardinalities": {{"Student": "N", "Course": "N"}}, "entity_participations": {{"Student": "partial", "Course": "partial"}}}}
+  - Result: {{"entity_cardinalities": [{{"entity_name": "Student", "cardinality": "N"}}, {{"entity_name": "Course", "cardinality": "N"}}], "entity_participations": [{{"entity_name": "Student", "participation": "partial"}}, {{"entity_name": "Course", "participation": "partial"}}], "reasoning": "Many-to-many relationship..."}}
 
 - **Many-to-One (N:1) - CRITICAL**: Customer (N, partial) - Address (1, partial)
   - **MULTIPLE customers can share the SAME address** (e.g., family members, roommates)
   - Each address can be associated with many customers
   - Each customer has one address (for delivery purposes)
   - This is **NOT one-to-one** - it is **many-to-one** (customers are "N", address is "1")
-  - Result: {{"entity_cardinalities": {{"Customer": "N", "Address": "1"}}, "entity_participations": {{"Customer": "partial", "Address": "partial"}}}}
+  - Result: {{"entity_cardinalities": [{{"entity_name": "Customer", "cardinality": "N"}}, {{"entity_name": "Address", "cardinality": "1"}}], "entity_participations": [{{"entity_name": "Customer", "participation": "partial"}}, {{"entity_name": "Address", "participation": "partial"}}], "reasoning": "Many-to-one relationship..."}}
   - **Common mistake**: Do NOT mark this as 1:1 just because "each customer has one address" - the key question is "can multiple customers share the same address?" If yes → many-to-one
 
 - **One-to-One (1:1)**: User (1, partial) - Profile (1, total)
@@ -443,7 +514,7 @@ Examples:
   - **CRITICAL**: In a true 1:1, instances are unique and cannot be shared
   - Not all users have profiles (User: partial)
   - Every profile must belong to a user (Profile: total)
-  - Result: {{"entity_cardinalities": {{"User": "1", "Profile": "1"}}, "entity_participations": {{"User": "partial", "Profile": "total"}}}}
+  - Result: {{"entity_cardinalities": [{{"entity_name": "User", "cardinality": "1"}}, {{"entity_name": "Profile", "cardinality": "1"}}], "entity_participations": [{{"entity_name": "User", "participation": "partial"}}, {{"entity_name": "Profile", "participation": "total"}}], "reasoning": "One-to-one relationship..."}}
 
 For each entity in the relationship, determine:
 1. Cardinality: whether it participates as "1" or "N"
@@ -469,12 +540,13 @@ Important:
 - Provide clear reasoning for your decisions, especially explaining why it's many-to-one vs one-to-one
 
 STRICT OUTPUT KEYING (CRITICAL):
-- You MUST use the EXACT entity names provided in "Relation: Entities" as the ONLY keys in BOTH dictionaries.
-- Keys are case-sensitive and must match exactly (CamelCase included).
-- Do NOT use lowercase keys, snake_case keys, pluralized keys, or synonyms.
-- Include ALL entities from the relation in BOTH dictionaries (no omissions, no extras).
+- You MUST use the EXACT entity names provided in "Relation: Entities" as the entity_name values in BOTH lists.
+- Entity names are case-sensitive and must match exactly (CamelCase included).
+- Do NOT use lowercase entity names, snake_case entity names, pluralized entity names, or synonyms.
+- Include ALL entities from the relation in BOTH lists (no omissions, no extras).
+- Each list must contain one entry per entity with the exact entity name.
 - If you omit any required field (entity_cardinalities / entity_participations / reasoning), the response will be rejected.
-- Even if you are uncertain, you MUST still output complete dictionaries with your best-guess values.
+- Even if you are uncertain, you MUST still output complete lists with your best-guess values.
 
 CRITICAL: You MUST return ONLY valid JSON. Do NOT include any markdown formatting, explanations, or text outside the JSON object.
 
@@ -482,22 +554,19 @@ You have access to validation tools:
 1) validate_entity_cardinality: validate that cardinality values are "1" or "N"
 2) validate_relation_cardinality_output: validate completeness/allowed values for the full output
 
-Return a JSON object with exactly these fields:
-- entity_cardinalities: Dictionary mapping each entity name to "1" or "N"
-- entity_participations: Dictionary mapping each entity name to "total" or "partial"
-- reasoning: String with clear explanation of your cardinality and participation decisions
+""" + output_structure_section + """
 
 Example JSON output (NO markdown, NO text before/after):
-{{"entity_cardinalities": {{"Customer": "1", "Order": "N"}}, "entity_participations": {{"Customer": "partial", "Order": "total"}}, "reasoning": "The relationship is one-to-many..."}}"""
+{{"entity_cardinalities": [{{"entity_name": "Customer", "cardinality": "1"}}, {{"entity_name": "Order", "cardinality": "N"}}], "entity_participations": [{{"entity_name": "Customer", "participation": "partial"}}, {{"entity_name": "Order", "participation": "total"}}], "reasoning": "The relationship is one-to-many..."}}"""
     
     # Human prompt template
     # Note: Use format() placeholders for template variables, not f-string
     # to avoid conflicts with entity names that might contain special characters
     entities_str = ", ".join(entities_in_rel)
-    # Provide an explicit JSON skeleton with exact keys to maximize model compliance.
-    # Values are placeholders; the model must replace them with correct values.
-    skeleton_cards = ", ".join([f"\"{e}\": \"1\"" for e in entities_in_rel])
-    skeleton_parts = ", ".join([f"\"{e}\": \"partial\"" for e in entities_in_rel])
+    # Build list template for entity_cardinalities and entity_participations
+    cardinality_entries = ",\n    ".join([f'{{"entity_name": "{e}", "cardinality": "1"}}' for e in entities_in_rel])
+    participation_entries = ",\n    ".join([f'{{"entity_name": "{e}", "participation": "partial"}}' for e in entities_in_rel])
+    
     human_prompt = """Relation:
 - Entities: {entities_str}
 - Type: {rel_type}
@@ -509,17 +578,23 @@ Entity details:
 Original description (if available):
 {{nl_description}}
 
-REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
+REQUIRED OUTPUT TEMPLATE (fill this in; use lists of objects with entity_name fields):
 {{
-  "entity_cardinalities": {{{skeleton_cards}}},
-  "entity_participations": {{{skeleton_parts}}},
+  "entity_cardinalities": [
+    {cardinality_entries}
+  ],
+  "entity_participations": [
+    {participation_entries}
+  ],
   "reasoning": "explain your decisions"
-}}""".format(
+}}
+
+Note: Replace the placeholder values ("1" for cardinality, "partial" for participation) with the correct values based on the relationship analysis.""".format(
         entities_str=entities_str,
         rel_type=rel_type,
         rel_description=rel_description or "No description",
-        skeleton_cards=skeleton_cards,
-        skeleton_parts=skeleton_parts,
+        cardinality_entries=cardinality_entries,
+        participation_entries=participation_entries,
     )
     
     # Initialize model
@@ -560,10 +635,44 @@ REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
     try:
         result: RelationCardinalityOutputLoose = await _call_llm(human_prompt)
         
-        # Extract raw (loose) payload
-        cardinalities = result.entity_cardinalities or {}
-        participations = result.entity_participations or {}
+        # Extract raw (loose) payload - handle both list and dict formats
+        cardinalities_raw = result.entity_cardinalities or []
+        participations_raw = result.entity_participations or []
         reasoning = result.reasoning or ""
+
+        # Convert lists to dictionaries if needed
+        # The LLM returns lists of EntityCardinalityEntry/EntityParticipationEntry objects
+        if isinstance(cardinalities_raw, list):
+            cardinalities = {}
+            for item in cardinalities_raw:
+                if isinstance(item, dict):
+                    # Handle dict format: {"entity_name": "...", "cardinality": "..."}
+                    entity_name = item.get("entity_name", "")
+                    cardinality = item.get("cardinality", "")
+                    if entity_name and cardinality:
+                        cardinalities[entity_name] = cardinality
+                elif hasattr(item, "entity_name") and hasattr(item, "cardinality"):
+                    # Handle Pydantic model format
+                    cardinalities[item.entity_name] = item.cardinality
+        else:
+            # Already a dict
+            cardinalities = cardinalities_raw or {}
+
+        if isinstance(participations_raw, list):
+            participations = {}
+            for item in participations_raw:
+                if isinstance(item, dict):
+                    # Handle dict format: {"entity_name": "...", "participation": "..."}
+                    entity_name = item.get("entity_name", "")
+                    participation = item.get("participation", "")
+                    if entity_name and participation:
+                        participations[entity_name] = participation
+                elif hasattr(item, "entity_name") and hasattr(item, "participation"):
+                    # Handle Pydantic model format
+                    participations[item.entity_name] = item.participation
+        else:
+            # Already a dict
+            participations = participations_raw or {}
 
         # Canonicalize keys (LLMs often return lowercase/snake_case variants).
         cardinalities, participations = _canonicalize_llm_constraint_dicts(
@@ -587,8 +696,37 @@ REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
                 + "\n\nReturn corrected JSON with complete dictionaries for ALL entities."
             )
             repaired: RelationCardinalityOutputLoose = await _call_llm(repair_prompt)
-            cardinalities = (repaired.entity_cardinalities or {})
-            participations = (repaired.entity_participations or {})
+            
+            # Convert lists to dictionaries if needed (same logic as above)
+            cardinalities_raw = repaired.entity_cardinalities or []
+            participations_raw = repaired.entity_participations or []
+            
+            if isinstance(cardinalities_raw, list):
+                cardinalities = {}
+                for item in cardinalities_raw:
+                    if isinstance(item, dict):
+                        entity_name = item.get("entity_name", "")
+                        cardinality = item.get("cardinality", "")
+                        if entity_name and cardinality:
+                            cardinalities[entity_name] = cardinality
+                    elif hasattr(item, "entity_name") and hasattr(item, "cardinality"):
+                        cardinalities[item.entity_name] = item.cardinality
+            else:
+                cardinalities = cardinalities_raw or {}
+
+            if isinstance(participations_raw, list):
+                participations = {}
+                for item in participations_raw:
+                    if isinstance(item, dict):
+                        entity_name = item.get("entity_name", "")
+                        participation = item.get("participation", "")
+                        if entity_name and participation:
+                            participations[entity_name] = participation
+                    elif hasattr(item, "entity_name") and hasattr(item, "participation"):
+                        participations[item.entity_name] = item.participation
+            else:
+                participations = participations_raw or {}
+            
             reasoning = repaired.reasoning or reasoning
             cardinalities, participations = _canonicalize_llm_constraint_dicts(
                 entities=entities_in_rel,
@@ -601,11 +739,13 @@ REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
                 entity_participations=participations,
             )
             if check2.get("valid", True):
-                return {
-                    "entity_cardinalities": cardinalities,
-                    "entity_participations": participations,
-                    "reasoning": reasoning,
-                }
+                card_list = _dict_to_cardinality_list(cardinalities)
+                part_list = _dict_to_participation_list(participations)
+                return RelationCardinalityOutput(
+                    entity_cardinalities=card_list,
+                    entity_participations=part_list,
+                    reasoning=reasoning,
+                )
 
             # Final deterministic fallback (no exception; keep pipeline stable).
             logger.warning(
@@ -624,25 +764,30 @@ REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
                 entity_cardinalities=fallback_cards,
                 rel_text=rel_text,
             )
-            return {
-                "entity_cardinalities": fallback_cards,
-                "entity_participations": fallback_parts,
-                "reasoning": (
+            card_list = _dict_to_cardinality_list(fallback_cards)
+            part_list = _dict_to_participation_list(fallback_parts)
+            return RelationCardinalityOutput(
+                entity_cardinalities=card_list,
+                entity_participations=part_list,
+                reasoning=(
                     "Fallback (deterministic): LLM returned incomplete cardinality/participation output even after repair. "
                     f"Validation error: {check2.get('error')}"
                 ),
-            }
+            )
 
         logger.debug(
             f"Relation {', '.join(entities_in_rel)} cardinalities: {cardinalities}, participations: {participations}"
         )
         
-        # Convert to dict only at return boundary
-        return {
-            "entity_cardinalities": cardinalities,
-            "entity_participations": participations,
-            "reasoning": reasoning,
-        }
+        # Convert dicts to lists at return boundary
+        card_list = _dict_to_cardinality_list(cardinalities)
+        part_list = _dict_to_participation_list(participations)
+        
+        return RelationCardinalityOutput(
+            entity_cardinalities=card_list,
+            entity_participations=part_list,
+            reasoning=reasoning,
+        )
         
     except Exception as e:
         # Never fail Phase 1 due to unstable cardinality inference. Use deterministic fallback.
@@ -663,21 +808,23 @@ REQUIRED OUTPUT TEMPLATE (fill this in; keep keys EXACTLY as shown):
             entity_cardinalities=fallback_cards,
             rel_text=rel_text,
         )
-        return {
-            "entity_cardinalities": fallback_cards,
-            "entity_participations": fallback_parts,
-            "reasoning": (
+        card_list = _dict_to_cardinality_list(fallback_cards)
+        part_list = _dict_to_participation_list(fallback_parts)
+        return RelationCardinalityOutput(
+            entity_cardinalities=card_list,
+            entity_participations=part_list,
+            reasoning=(
                 "Fallback (deterministic): exception during LLM inference. "
                 f"Error: {str(e)}"
             ),
-        }
+        )
 
 
 async def step_1_11_relation_cardinality(
-    relations: List[Dict[str, Any]],
-    entities: List[Dict[str, Any]],
+    relations: List,
+    entities: List,
     nl_description: Optional[str] = None,
-) -> Dict[str, Any]:
+):
     """
     Step 1.11: Determine cardinality and participation for all relations (parallel execution).
     

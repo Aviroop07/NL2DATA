@@ -82,13 +82,21 @@ class DSLSchemaContext:
                 idx.setdefault(col, set()).add(tname)
         return idx
 
-    def resolve_identifier(self, identifier: str) -> tuple[Optional[str], Optional[str], Optional[DSLType], Optional[str]]:
+    def resolve_identifier(self, identifier: str, anchor_table: Optional[str] = None) -> tuple[Optional[str], Optional[str], Optional[DSLType], Optional[str]]:
         """Resolve identifier to (table, column, type, error).
 
         Rules:
-        - Allow bare column name if it exists in exactly one table.
+        - If anchor_table is provided, bare identifiers resolve first to anchor_table columns (anchor-first resolution).
+        - Allow bare column name if it exists in exactly one table (or in anchor_table if provided).
         - Allow table.column.
         - Reject deeper paths (schema.table.column) for now.
+        
+        Args:
+            identifier: The identifier to resolve
+            anchor_table: Optional anchor table name for anchor-first resolution
+            
+        Returns:
+            Tuple of (table_name, column_name, type, error_message)
         """
         raw = (identifier or "").strip()
         if not raw:
@@ -96,10 +104,36 @@ class DSLSchemaContext:
 
         parts = [p for p in raw.split(".") if p]
         if len(parts) == 1:
+            # Bare identifier - use anchor-first resolution if anchor_table is provided
             col = parts[0]
+            
+            # Anchor-first resolution: check anchor_table first
+            if anchor_table:
+                anchor_schema = self.tables.get(anchor_table)
+                if anchor_schema and col in anchor_schema.columns:
+                    # Found in anchor table - resolve to anchor table (no ambiguity)
+                    return anchor_table, col, anchor_schema.columns.get(col, "unknown"), None
+            
+            # Fall back to global resolution
             idx = self.all_columns_index().get(col, set())
             if not idx:
                 return None, None, None, f"Unknown column '{col}'"
+            
+            # If anchor_table was provided but column not found there, check if ambiguous
+            if anchor_table:
+                # Column exists in other tables but not in anchor table
+                # This is valid - it's not ambiguous because anchor-first already checked
+                if len(idx) == 1:
+                    tname = next(iter(idx))
+                    ctype = self.tables.get(tname).columns.get(col, "unknown") if self.tables.get(tname) else "unknown"
+                    return tname, col, ctype, None
+                # Multiple tables have this column, but not anchor table
+                # This is still valid - resolve to first match (or could be made stricter)
+                tname = next(iter(idx))
+                ctype = self.tables.get(tname).columns.get(col, "unknown") if self.tables.get(tname) else "unknown"
+                return tname, col, ctype, None
+            
+            # No anchor table - use existing global resolution
             if len(idx) > 1:
                 return None, None, None, f"Ambiguous column '{col}' found in tables {sorted(idx)}; use Table.{col}"
             tname = next(iter(idx))

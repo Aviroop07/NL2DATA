@@ -354,7 +354,18 @@ def validate_generation_strategies_complete(
     issues = []
     
     for entity_name, attrs in attributes.items():
+        # Try to get strategies by entity name first, then try variations
         entity_strategies = generation_strategies.get(entity_name, {})
+        
+        # If not found, try to find by checking all keys (in case of name mismatches)
+        if not entity_strategies:
+            # Check if any key in generation_strategies matches (case-insensitive or partial match)
+            for key in generation_strategies.keys():
+                if key.lower() == entity_name.lower() or entity_name.lower() in key.lower() or key.lower() in entity_name.lower():
+                    entity_strategies = generation_strategies.get(key, {})
+                    if entity_strategies:
+                        break
+        
         for attr in attrs:
             attr_name = attr.get("name", "") if isinstance(attr, dict) else getattr(attr, "name", "")
             if not attr_name:

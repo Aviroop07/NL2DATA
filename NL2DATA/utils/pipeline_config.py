@@ -123,17 +123,33 @@ def get_phase2_config() -> Phase2Config:
 
 
 @dataclass(frozen=True)
+class Phase5Config:
+    """Phase 5 tuning knobs (env-backed).
+
+    Phase 5 covers information need identification and completeness checking.
+    """
+
+    # Step 5.1 info needs: validation + revision loop rounds
+    step_5_1_max_revision_rounds: int = _get_int("NL2DATA_PHASE5_STEP_5_1_MAX_REVISION_ROUNDS", 5, min_value=0, max_value=10)
+
+    # Step 5.2 completeness: loop bounds (kept small for speed)
+    step_5_2_max_iterations: int = _get_int("NL2DATA_PHASE5_STEP_5_2_MAX_ITERATIONS", 3, min_value=1, max_value=10)
+    step_5_2_max_time_sec: int = _get_int("NL2DATA_PHASE5_STEP_5_2_MAX_TIME_SEC", 120, min_value=30, max_value=600)
+
+    # Phase 5: disable tool-based executors for speed + determinism (use deterministic checks instead)
+    phase5_tools_enabled: int = _get_int("NL2DATA_PHASE5_TOOLS_ENABLED", 0, min_value=0, max_value=1)
+
+
+def get_phase5_config() -> Phase5Config:
+    return Phase5Config()
+
+
+# Backwards compatibility (pre-migration): Phase 3 used to host info-needs logic.
+@dataclass(frozen=True)
 class Phase3Config:
-    """Phase 3 tuning knobs (env-backed)."""
-
-    # Step 3.1 info needs: validation + revision loop rounds
     step_3_1_max_revision_rounds: int = _get_int("NL2DATA_PHASE3_STEP_3_1_MAX_REVISION_ROUNDS", 5, min_value=0, max_value=10)
-
-    # Step 3.2 completeness: loop bounds (kept small for speed)
-    step_3_2_max_iterations: int = _get_int("NL2DATA_PHASE3_STEP_3_2_MAX_ITERATIONS", 5, min_value=1, max_value=10)
+    step_3_2_max_iterations: int = _get_int("NL2DATA_PHASE3_STEP_3_2_MAX_ITERATIONS", 3, min_value=1, max_value=10)
     step_3_2_max_time_sec: int = _get_int("NL2DATA_PHASE3_STEP_3_2_MAX_TIME_SEC", 120, min_value=30, max_value=600)
-
-    # Phase 3: disable tool-based executors for speed + determinism (use deterministic checks instead)
     phase3_tools_enabled: int = _get_int("NL2DATA_PHASE3_TOOLS_ENABLED", 0, min_value=0, max_value=1)
 
 
@@ -160,4 +176,38 @@ class Phase4Config:
 
 def get_phase4_config() -> Phase4Config:
     return Phase4Config()
+
+
+@dataclass(frozen=True)
+class Phase11Config:
+    """Phase 11 tuning knobs (env-backed)."""
+
+    # Step 11.1 FD analysis: revision rounds for invalid/cross-entity outputs
+    step_11_1_max_revision_rounds: int = _get_int("NL2DATA_PHASE11_STEP_11_1_MAX_REVISION_ROUNDS", 5, min_value=0, max_value=10)
+
+    # Context control: include full NL only when needed (default off)
+    step_11_1_include_nl_context: int = _get_int("NL2DATA_PHASE11_STEP_11_1_INCLUDE_NL_CONTEXT", 0, min_value=0, max_value=1)
+
+
+def get_phase11_config() -> Phase11Config:
+    return Phase11Config()
+
+
+@dataclass(frozen=True)
+class Phase7Config:
+    """Phase 7 tuning knobs (env-backed).
+    
+    Phase 7 covers constraints and generation strategies.
+    Many steps were moved from Phase 4, so this config is similar to Phase4Config.
+    """
+    
+    # Context control: include full NL only when needed (default off)
+    step_7_3_include_nl_context: int = _get_int("NL2DATA_PHASE7_STEP_7_3_INCLUDE_NL_CONTEXT", 0, min_value=0, max_value=1)
+    step_7_5_include_nl_context: int = _get_int("NL2DATA_PHASE7_STEP_7_5_INCLUDE_NL_CONTEXT", 0, min_value=0, max_value=1)
+    step_7_6_include_nl_context: int = _get_int("NL2DATA_PHASE7_STEP_7_6_INCLUDE_NL_CONTEXT", 0, min_value=0, max_value=1)
+    step_7_7_include_nl_context: int = _get_int("NL2DATA_PHASE7_STEP_7_7_INCLUDE_NL_CONTEXT", 0, min_value=0, max_value=1)
+
+
+def get_phase7_config() -> Phase7Config:
+    return Phase7Config()
 

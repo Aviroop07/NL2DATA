@@ -7,7 +7,26 @@ openai:
   model: "gpt-4o-mini"
   temperature: 0  # Zero temperature for maximum consistency and determinism
   max_tokens: 16000  # Maximum tokens per response (default, can be overridden per task)
-  timeout: 180  # Request timeout in seconds
+  timeout: 180  # Request timeout in seconds (default, can be overridden per task)
+  
+  # Timeout per task type (overrides default timeout)
+  timeout_per_task:
+    # Simple tasks - shorter timeout
+    simple: 120  # Domain detection, entity mention detection, simple validations
+    # Important tasks - medium timeout
+    important: 150  # Entity extraction, relation extraction, constraint analysis, domain inference
+    # Reasoning tasks - longer timeout for complex reasoning
+    reasoning: 240  # Complex reasoning, entity consolidation, relation validation
+    # Critical reasoning - longest timeout for highest-stakes decisions
+    critical_reasoning: 300  # Entity extraction, relation extraction, cardinality, functional dependencies
+    # Advanced reasoning - long timeout for complex validation
+    advanced_reasoning: 300  # Schema validation, information need identification, completeness checks
+    # High-fan-out tasks - medium timeout (many entities/relations)
+    high_fanout: 150  # Attribute discovery (many entities), per-entity/per-relation tasks
+    # Validation tasks - shorter timeout
+    validation: 120  # Syntax validation, naming validation
+    # Error correction - longer timeout for detailed corrections
+    error_correction: 200  # DDL error correction, SQL query correction
   
   # Max tokens per task type (overrides default max_tokens)
   max_tokens_per_task:

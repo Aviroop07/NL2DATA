@@ -20,7 +20,13 @@ from .agent_utils import (
     invoke_agent_with_structured_output,
     invoke_agent_with_retry,
 )
-from .error_feedback import NoneOutputError, NoneFieldError
+from .error_feedback import (
+    NoneOutputError,
+    NoneFieldError,
+    ErrorCategory,
+    categorize_error,
+    create_error_feedback_message,
+)
 
 __all__ = [
     # Standardized calls (recommended)
@@ -37,4 +43,7 @@ __all__ = [
     # Error handling
     "NoneOutputError",
     "NoneFieldError",
+    "ErrorCategory",
+    "categorize_error",
+    "create_error_feedback_message",
 ]

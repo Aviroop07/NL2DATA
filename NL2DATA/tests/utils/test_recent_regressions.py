@@ -77,8 +77,8 @@ def test_step_4_4_handles_reasoning_none(monkeypatch) -> None:
 def test_step_3_5_junction_table_fk_collision_is_avoided() -> None:
     # Deterministic: uses the compiler directly (no LLM)
     from NL2DATA.ir.models.er_relational import ERDesign, EREntity, ERRelation, ERAttribute
-    from NL2DATA.phases.phase3.step_3_5_relational_schema_compilation import (
-        step_3_5_relational_schema_compilation,
+    from NL2DATA.phases.phase3.step_4_3_relational_schema_compilation import (
+        step_4_3_relational_schema_compilation,
     )
 
     er = ERDesign(
@@ -107,7 +107,7 @@ def test_step_3_5_junction_table_fk_collision_is_avoided() -> None:
         ],
     )
 
-    schema = step_3_5_relational_schema_compilation(
+    schema = step_4_3_relational_schema_compilation(
         er_design=er.model_dump(),
         foreign_keys=[],
         primary_keys={"SENSOR": ["sensor_id"], "INCIDENT": ["sensor_id"]},

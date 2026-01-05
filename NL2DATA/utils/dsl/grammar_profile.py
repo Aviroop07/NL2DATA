@@ -26,24 +26,15 @@ class DSLGrammarProfile:
 
 
 # Feature flags (string constants)
-FEATURE_BETWEEN = "between"  # add: expr BETWEEN expr AND expr
-FEATURE_IS_NULL = "is_null"  # add: expr IS NULL / expr IS NOT NULL
+FEATURE_RELATIONAL_CONSTRAINTS = "relational_constraints"  # add: EXISTS, LOOKUP, *_WHERE aggregates, IN_RANGE
 
 
 _EXT_FRAGMENTS = {
-    FEATURE_BETWEEN: r"""
-// --- optional: BETWEEN operator ---
-BETWEEN.2: /(?i:between)/
-// Also requires AND keyword (already exists) in base grammar.
-// cmp_tail extension:
-| BETWEEN sum_expr AND sum_expr
-""",
-    FEATURE_IS_NULL: r"""
-// --- optional: IS NULL / IS NOT NULL ---
-IS.2: /(?i:is)/
-// cmp_tail extension:
-| IS NULL
-| IS NOT NULL
+    FEATURE_RELATIONAL_CONSTRAINTS: r"""
+// --- optional: Relational constraint functions ---
+// These are already defined in base grammar as atoms, but we document them here
+// for the extension profile. The actual grammar rules are in the base grammar.
+// Keywords are already defined in base grammar.
 """,
 }
 

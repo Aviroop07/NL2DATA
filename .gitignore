@@ -14,6 +14,17 @@ NL2DATA/tests/output/**
 NL2DATA/runs/
 NL2DATA/runs/**
 
+# Generated ER diagrams and static files
+backend/static/er_diagrams/
+backend/static/er_diagrams/**
+backend/static/test_er_diagrams/
+backend/static/test_er_diagrams/**
+
+# Frontend build outputs
+front end/dist/
+front end/build/
+front end/.vite/
+
 # Markdown (user request: do not push any .md files)
 *.md
 !README.md
@@ -47,6 +58,14 @@ env/
 **/node_modules/
 **/dist/
 **/build/
+**/.vite/
+*.tsbuildinfo
+
+# Package manager locks (optional - some teams prefer to commit these)
+# Uncomment if you want to ignore lock files
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
 
 
 # ----------------------------
@@ -57,5 +76,32 @@ env/
 Thumbs.db
 Desktop.ini
 .DS_Store
+.vscodeignore
+.cursorignore
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# LangSmith / LangChain
+.langchain/
+langsmith.json
 
 

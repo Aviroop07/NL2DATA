@@ -6,14 +6,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from NL2DATA.phases.phase7.tools.catalog import GENERATION_TOOL_CATALOG, GenerationToolDefinition
-from NL2DATA.phases.phase7.tools.mapping import (
+from NL2DATA.phases.phase9.tools.catalog import GENERATION_TOOL_CATALOG, GenerationToolDefinition
+from NL2DATA.phases.phase9.tools.mapping import (
     TOOL_TO_STRATEGY_MAP,
     create_strategy_from_tool_call,
     get_tools_for_column,
     get_allowed_strategy_kinds_for_column,
 )
-from NL2DATA.phases.phase7.tools.langchain_tools import (
+from NL2DATA.phases.phase9.tools.langchain_tools import (
     create_generation_tool_from_definition,
     get_langchain_tools_for_column,
 )

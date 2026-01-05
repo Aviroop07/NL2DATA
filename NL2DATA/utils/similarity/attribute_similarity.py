@@ -9,6 +9,7 @@ This module must remain safe to import even if sentence-transformers is not inst
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import re
 import difflib
@@ -89,7 +90,9 @@ def _is_name_like(name: str) -> bool:
     return "name" in toks
 
 
+@lru_cache(maxsize=1000)
 def _lexical_jaccard(name_a: str, name_b: str) -> float:
+    """Calculate lexical Jaccard similarity between two attribute names (cached)."""
     ta = _token_set_for_synonym_heuristics(name_a)
     tb = _token_set_for_synonym_heuristics(name_b)
     if not ta and not tb:
@@ -99,7 +102,9 @@ def _lexical_jaccard(name_a: str, name_b: str) -> float:
     return float(inter) / float(union) if union else 0.0
 
 
+@lru_cache(maxsize=1000)
 def _char_similarity(name_a: str, name_b: str) -> float:
+    """Calculate character-level similarity between two attribute names (cached)."""
     a = _normalize_name_for_tokens(name_a)
     b = _normalize_name_for_tokens(name_b)
     if not a or not b:

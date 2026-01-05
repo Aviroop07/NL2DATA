@@ -18,6 +18,16 @@ export interface AppState {
   currentStep: string | null;
   progress: number;
   
+  // Checkpoint workflow
+  currentCheckpoint: "domain" | "entities" | "relations" | "attributes" | "primary_keys" | "multivalued_derived" | "nullability" | "default_values" | "check_constraints" | "phase2_final" | "er_diagram" | "datatypes" | "relational_schema" | "complete" | null;
+  checkpointData: Record<string, any> | null;
+  checkpointJustification: Record<string, any> | null;
+  completedCheckpoints: Array<{
+    type: "domain" | "entities" | "relations" | "attributes" | "primary_keys" | "multivalued_derived" | "nullability" | "default_values" | "check_constraints" | "phase2_final" | "er_diagram" | "datatypes" | "relational_schema";
+    data: Record<string, any>;
+    justification: Record<string, any> | null;
+  }>;
+  
   // Status Ticker
   statusTrail: StatusTick[];
   latestStatusMessage: string | null;
@@ -77,7 +87,9 @@ export interface Entity {
 export interface Relation {
   entities: string[];
   type: string;
-  description: string;
+  description?: string;
+  entity_cardinalities?: Record<string, "1" | "N">;
+  entity_participations?: Record<string, "total" | "partial">;
 }
 
 export interface ERDiagram {

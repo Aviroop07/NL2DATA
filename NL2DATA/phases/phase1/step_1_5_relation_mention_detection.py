@@ -3,9 +3,8 @@
 Checks if relationships between entities are explicitly mentioned in the description.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Literal
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
@@ -15,6 +14,7 @@ from NL2DATA.utils.tools.validation_tools import (
     _verify_evidence_substring_impl,
     _verify_entity_in_known_entities_impl,
 )
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 
 logger = get_logger(__name__)
 
@@ -43,8 +43,8 @@ class RelationMentionOutput(BaseModel):
 @traceable_step("1.5", phase=1, tags=["relation_mention_detection"])
 async def step_1_5_relation_mention_detection(
     nl_description: str,
-    entities: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+    entities: Optional[List] = None,
+) -> RelationMentionOutput:
     """
     Step 1.5: Check if relationships between entities are explicitly mentioned.
     
@@ -78,6 +78,16 @@ async def step_1_5_relation_mention_detection(
                 n = (getattr(e, "name", "") or "").strip()
             if n:
                 known_entities.append(n)
+    
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=RelationMentionOutput,
+        additional_requirements=[
+            "Grounding rule (critical): For every relation, evidence MUST be copied verbatim from the input (exact substring; preserve casing/spaces)",
+            "Subject and object MUST be from KnownEntities list (verify with tool)",
+            "Reasoning must be <= 25 words"
+        ]
+    )
     
     system_prompt = """You are an information extraction engine.
 
@@ -114,21 +124,7 @@ Before finalizing your response:
    {"evidence": "<relation.evidence>", "nl_description": "<full_nl_description>"}
 3) If is_substring = false for any relation, correct the evidence to be an exact substring from nl_description, then re-check.
 
-Output: Return a single JSON object with exactly:
-{
-  "has_explicit_relations": boolean,
-  "relations": [
-    {
-      "subject": string,
-      "predicate": string,
-      "object": string,
-      "evidence": string
-    }
-  ],
-  "reasoning": string
-}
-
-No extra text. No markdown. No code fences."""
+""" + output_structure_section
     
     # Human prompt template
     human_prompt = """Natural language description:
@@ -193,8 +189,7 @@ KnownEntities: {known_entities}
         if result.relations:
             logger.info(f"Found {len(result.relations)} explicitly mentioned relations")
         
-        # Convert to dict only at return boundary
-        return result.model_dump()
+        return result
         
     except Exception as e:
         logger.error(f"Error in relation mention detection: {e}", exc_info=True)

@@ -13,13 +13,14 @@ Design:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, List, Optional, Literal
 from pydantic import BaseModel, Field, ConfigDict
 
 from NL2DATA.phases.phase1.model_router import get_model_for_step
 from NL2DATA.utils.llm import standardized_llm_call
 from NL2DATA.utils.observability import traceable_step, get_trace_config
 from NL2DATA.utils.logging import get_logger
+from NL2DATA.utils.prompt_helpers import generate_output_structure_section_with_custom_requirements
 from NL2DATA.phases.phase1.utils.entity_reclassification import pick_associative_candidates
 from NL2DATA.utils.tools.validation_tools import (
     _verify_entity_in_known_entities_impl,
@@ -31,10 +32,17 @@ from NL2DATA.utils.tools.validation_tools import (
 logger = get_logger(__name__)
 
 
+class EndpointInfo(BaseModel):
+    side: str = Field(description="Side of the relationship: 'left' or 'right'")
+    entity_name: str = Field(description="Name of the entity on this side")
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ReclassifyAsRelation(BaseModel):
     name: str = Field(description="Entity name that should be reclassified as a relation (associative/link).")
     reasoning: str = Field(description="Why this looks like a relation/junction rather than a standalone entity.")
-    endpoints: Dict[str, str] = Field(description="Entity endpoints with 'left' and 'right' keys (from EntityRegistry)")
+    endpoints: List[EndpointInfo] = Field(description="List of endpoint information with 'left' and 'right' sides (from EntityRegistry)")
     relationship_type: Literal["one_to_one", "one_to_many", "many_to_many"] = Field(description="Type of relationship")
     key_strategy: Literal["composite_fk", "surrogate_pk"] = Field(description="Key strategy for the relation")
     relationship_attributes: List[str] = Field(default_factory=list, description="Non-key attributes carried by the link")
@@ -55,14 +63,14 @@ class EntityRelationReclassificationOutput(BaseModel):
 
 @traceable_step("1.75", phase=1, tags=["entity_reclassification"])
 async def step_1_75_entity_relation_reclassification(
-    entities: List[Dict[str, Any]],
+    entities: List,
     nl_description: str,
     domain: Optional[str] = None,
     *,
     heuristic_threshold: float = 0.6,
     use_llm_verification: bool = True,
     max_iterations: int = 2,
-) -> Dict[str, Any]:
+) -> EntityRelationReclassificationOutput:
     """Reclassify false-positive 'entities' that are really associative relations."""
     entity_names = [
         e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")
@@ -71,24 +79,26 @@ async def step_1_75_entity_relation_reclassification(
     ]
 
     if not entities:
-        return {
-            "entities": [],
-            "removed_entity_names": [],
-            "reclassified": [],
-            "relation_candidates": [],
-        }
+        return EntityRelationReclassificationOutput(
+            keep_entities=[],
+            reclassify_as_relation=[],
+            reasoning="No entities provided for reclassification.",
+        )
 
     # 1) Deterministic heuristic guardrail
     candidates = pick_associative_candidates(entities, threshold=heuristic_threshold)
     candidate_names = [c.name for c in candidates]
     if not candidate_names:
         logger.debug("Step 1.75: No heuristic associative candidates found.")
-        return {
-            "entities": entities,
-            "removed_entity_names": [],
-            "reclassified": [],
-            "relation_candidates": [],
-        }
+        entity_names = [
+            e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")
+            for e in entities
+        ]
+        return EntityRelationReclassificationOutput(
+            keep_entities=entity_names,
+            reclassify_as_relation=[],
+            reasoning="No heuristic associative candidates found.",
+        )
 
     logger.info(f"Step 1.75: Heuristic candidates for reclassification: {candidate_names}")
 
@@ -99,22 +109,43 @@ async def step_1_75_entity_relation_reclassification(
 
     if not use_llm_verification:
         removed_names = list(candidate_names)
-        reclassified = [
-            {"name": n, "reasoning": "Heuristic: associative/junction-like entity name/description."}
+        kept_entity_names = [
+            e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")
+            for e in entities
+            if (e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")) not in set(removed_names)
+        ]
+        # Create basic reclassification entries without endpoints (heuristic mode)
+        reclassified_list = [
+            ReclassifyAsRelation(
+                name=n,
+                reasoning="Heuristic: associative/junction-like entity name/description.",
+                endpoints=[],  # No endpoint info in heuristic mode
+                relationship_type="many_to_many",  # Default
+                key_strategy="composite_fk",  # Default
+                relationship_attributes=[]
+            )
             for n in removed_names
         ]
-        relation_candidates = [f"{n} is likely an associative relation with attributes." for n in removed_names]
-        kept_entities = [e for e in entities if (e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")) not in set(removed_names)]
-        return {
-            "entities": kept_entities,
-            "removed_entity_names": removed_names,
-            "reclassified": reclassified,
-            "relation_candidates": relation_candidates,
-        }
+        return EntityRelationReclassificationOutput(
+            keep_entities=kept_entity_names,
+            reclassify_as_relation=reclassified_list,
+            reasoning=f"Heuristic reclassification: {len(removed_names)} entities removed as associative relations.",
+        )
 
     # 2) LLM verification loop over heuristic candidates
     # We only allow the LLM to decide among the heuristic candidates (safety).
     llm = get_model_for_step("1.75")
+
+    # Generate output structure section from Pydantic model
+    output_structure_section = generate_output_structure_section_with_custom_requirements(
+        output_schema=EntityRelationReclassificationOutput,
+        additional_requirements=[
+            "keep_entities must be a subset of Candidates",
+            "reclassify_as_relation[].name must be a subset of Candidates",
+            "endpoints.left and endpoints.right must be from EntityRegistry",
+            "Do NOT invent new entities, attributes, or endpoints outside EntityRegistry"
+        ]
+    )
 
     system_prompt = """You are a database modeling expert.
 
@@ -137,27 +168,7 @@ If reclassifying, you MUST provide:
 - key_strategy: composite_fk | surrogate_pk
 - relationship_attributes: list of non-key attributes carried by the link
 
-Output JSON only with EXACT keys:
-{
-  "keep_entities": [string],
-  "reclassify_as_relation": [
-    {
-      "name": string,
-      "endpoints": {"left": string, "right": string},
-      "relationship_type": "one_to_one"|"one_to_many"|"many_to_many",
-      "key_strategy": "composite_fk"|"surrogate_pk",
-      "relationship_attributes": [string],
-      "reasoning": string
-    }
-  ],
-  "reasoning": string
-}
-
-Constraints
-- keep_entities must be a subset of Candidates
-- reclassify_as_relation[].name must be a subset of Candidates
-- endpoints.left and endpoints.right must be from EntityRegistry
-- No extra keys. No markdown. No extra text.
+""" + output_structure_section + """
 
 Tool usage (mandatory)
 You have access to:
@@ -302,29 +313,31 @@ Use tools to validate: candidate subset membership, endpoint membership, and nam
     try:
         for item in out.reclassify_as_relation:
             if item.name in removed_set:
-                left = (item.endpoints or {}).get("left", "")
-                right = (item.endpoints or {}).get("right", "")
+                # Convert endpoints list to dict for compatibility
+                endpoints_dict = {ep.side: ep.entity_name for ep in item.endpoints}
+                left = endpoints_dict.get("left", "")
+                right = endpoints_dict.get("right", "")
                 relation_candidates.append(
                     f"{item.name} links {left} and {right} ({item.relationship_type}, {item.key_strategy})."
                 )
     except Exception:
         relation_candidates = [f"{n} is an associative/link relation with attributes." for n in removed_names]
 
-    kept_entities = [
-        e for e in entities
+    kept_entity_names = [
+        e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")
+        for e in entities
         if (e.get("name", "") if isinstance(e, dict) else getattr(e, "name", "")) not in removed_set
     ]
 
     logger.info(
         f"Step 1.75: Removed {len(removed_names)} associative entities: {removed_names}. "
-        f"Remaining entities: {len(kept_entities)}."
+        f"Remaining entities: {len(kept_entity_names)}."
     )
 
-    return {
-        "entities": kept_entities,
-        "removed_entity_names": removed_names,
-        "reclassified": reclassified,
-        "relation_candidates": relation_candidates,
-    }
+    return EntityRelationReclassificationOutput(
+        keep_entities=kept_entity_names,
+        reclassify_as_relation=out.reclassify_as_relation,
+        reasoning=out.reasoning,
+    )
 
 

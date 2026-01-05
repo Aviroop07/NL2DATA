@@ -4,7 +4,7 @@ Deterministic validation of naming conventions, reserved keywords, and conflicts
 This step uses code-based validation, not LLM calls.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from NL2DATA.utils.logging import get_logger
@@ -106,9 +106,9 @@ def _check_naming_convention(name: str) -> tuple[bool, Optional[str]]:
 
 
 def step_2_6_naming_convention_validation(
-    entities: List[Dict[str, Any]],
-    entity_attributes: Dict[str, List[str]],  # entity_name -> list of attribute names
-) -> Dict[str, Any]:
+    entities: List,
+    entity_attributes: dict,  # entity_name -> list of attribute names
+) -> NamingValidationOutput:
     """
     Step 2.6: Validate naming conventions for entities and attributes.
     
@@ -252,5 +252,5 @@ def step_2_6_naming_convention_validation(
         summary=summary
     )
     
-    return result.model_dump()
+    return result
 

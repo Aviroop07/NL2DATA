@@ -4,7 +4,6 @@ from functools import lru_cache
 from backend.utils.job_manager import JobManager
 from backend.utils.websocket_manager import WebSocketManager
 from backend.services.nl2data_service import NL2DataService
-from backend.services.status_ticker_service import StatusTickerService
 from backend.services.validation_service import ValidationService
 from backend.services.conversion_service import ConversionService
 from backend.services.diagram_service import DiagramService
@@ -20,14 +19,8 @@ def get_job_manager() -> JobManager:
 
 @lru_cache(maxsize=1)
 def get_websocket_manager() -> WebSocketManager:
-    """Singleton WebSocketManager - shared across all requests."""
+    """Singleton WebSocketManager - for WebSocket connections (currently not used for pipeline)."""
     return WebSocketManager()
-
-
-@lru_cache(maxsize=1)
-def get_status_ticker() -> StatusTickerService:
-    """Singleton StatusTickerService."""
-    return StatusTickerService()
 
 
 @lru_cache(maxsize=1)
@@ -58,8 +51,6 @@ def get_suggestion_service() -> SuggestionService:
 def get_nl2data_service() -> NL2DataService:
     """Create NL2DataService with dependencies (singleton)."""
     return NL2DataService(
-        ws_manager=get_websocket_manager(),
-        job_manager=get_job_manager(),
-        status_ticker=get_status_ticker()
+        job_manager=get_job_manager()
     )
 

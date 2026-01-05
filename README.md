@@ -62,11 +62,13 @@ The system follows a three-tier architecture:
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │ Phase 1: Domain & Entity Discovery                   │  │
 │  │ Phase 2: Attribute Discovery & Schema Design         │  │
-│  │ Phase 3: Query Requirements & Schema Refinement     │  │
-│  │ Phase 4: Functional Dependencies & Data Types       │  │
-│  │ Phase 5: DDL & SQL Generation                        │  │
-│  │ Phase 6: Constraints & Distributions                │  │
-│  │ Phase 7: Generation Strategies                      │  │
+│  │ Phase 3: ER Design Compilation                       │  │
+│  │ Phase 4: Relational Schema Compilation                │  │
+│  │ Phase 5: Data Type Assignment                         │  │
+│  │ Phase 6: DDL Generation & Schema Creation              │  │
+│  │ Phase 7: Information Mining                           │  │
+│  │ Phase 8: Functional Dependencies & Constraints        │  │
+│  │ Phase 9: Constraints & Generation Strategies          │  │
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -74,18 +76,29 @@ The system follows a three-tier architecture:
 ### Component Details
 
 **Frontend (`front end/`)**
-- Built with React 18, TypeScript, and Material-UI
+- Built with React 18, TypeScript, and Material-UI (MUI)
 - Real-time WebSocket communication for live progress updates
 - State management using Zustand
 - Form validation with React Hook Form and Zod
 - ER diagram and relational schema visualization/editing
+- Checkpoint management UI for step-by-step execution
+- Quality metrics and suggestions panel
+- Auto-save functionality
+- Responsive design with Material-UI components
+- Type-safe API clients with TypeScript
 
 **Backend (`backend/`)**
-- FastAPI-based REST API
-- WebSocket support for bidirectional communication
+- FastAPI-based REST API with automatic OpenAPI documentation
+- WebSocket support for bidirectional real-time communication
 - Job management system for tracking long-running pipeline executions
+- Checkpoint-based execution with state persistence
 - Service layer abstraction for pipeline integration
-- Request/response models with Pydantic
+- Request/response models with Pydantic validation
+- ER diagram generation and serving
+- Schema validation and conversion services
+- AI-powered suggestion service
+- Static file serving for generated diagrams
+- Comprehensive request/response logging
 
 **NL2DATA Pipeline (`NL2DATA/`)**
 - LangGraph-based workflow orchestration
@@ -96,22 +109,26 @@ The system follows a three-tier architecture:
 
 ## Pipeline Overview
 
-The NL2DATA pipeline consists of 7 sequential phases, each building upon the previous phase's output:
+The NL2DATA pipeline consists of 9 sequential phases, each building upon the previous phase's output:
 
 ```
 Phase 1: Domain & Entity Discovery
     ↓
 Phase 2: Attribute Discovery & Schema Design
     ↓
-Phase 3: Query Requirements & Schema Refinement
+Phase 3: ER Design Compilation
     ↓
-Phase 4: Functional Dependencies & Data Types
+Phase 4: Relational Schema Compilation
     ↓
-Phase 5: DDL & SQL Generation
+Phase 5: Data Type Assignment
     ↓
-Phase 6: Constraints & Distributions
+Phase 6: DDL Generation & Schema Creation
     ↓
-Phase 7: Generation Strategies
+Phase 7: Information Mining
+    ↓
+Phase 8: Functional Dependencies & Constraints
+    ↓
+Phase 9: Constraints & Generation Strategies
 ```
 
 Each phase is implemented as a LangGraph StateGraph, allowing for:
@@ -191,66 +208,76 @@ Each phase is implemented as a LangGraph StateGraph, allowing for:
 - Iterative naming validation
 - Parallel attribute processing where possible
 
-### Phase 3: Query Requirements & Schema Refinement
+### Phase 3: ER Design Compilation
 
-**Purpose**: Extract information needs, generate SQL queries, and refine the schema based on query requirements.
+**Purpose**: Compile entities, relations, and attributes into a complete ER design representation.
 
 **Steps**:
-1. **Information Need Identification (3.1)**: Extract query requirements from NL description
-2. **Information Completeness (3.2)**: Check if schema supports all information needs
-3. **Phase 2 Re-execution (3.3)**: Re-run Phase 2 if schema is incomplete (conditional)
-4. **ER Design Compilation (3.4)**: Compile complete ER design from Phase 1 & 2 results
-5. **Junction Table Naming (3.45)**: Generate names for many-to-many junction tables
-6. **Relational Schema Compilation (3.5)**: Convert ER design to relational schema
+1. **ER Design Compilation (3.1)**: Compile complete ER design from Phase 1 & 2 results, including entities, relations, attributes, primary keys, foreign keys, and constraints
+2. **Junction Table Naming (3.2)**: Generate appropriate names for many-to-many junction tables
 
 **Output**:
-- List of information needs/queries
-- SQL query templates
-- Complete ER design
-- Relational schema (tables, columns, keys)
-- Junction table definitions
+- Complete ER design structure
+- Entity-attribute mappings
+- Junction table name mappings
+- ER design metadata
 
 **Key Logic**:
-- Query-driven schema refinement
-- Conditional re-execution of Phase 2 if gaps found
-- ER to relational mapping with junction table handling
+- Consolidates all Phase 1 and Phase 2 outputs into a unified ER design
+- Handles many-to-many relationship table naming
+- Prepares data structure for relational schema conversion
 
-### Phase 4: Functional Dependencies & Data Types
+### Phase 4: Relational Schema Compilation
 
-**Purpose**: Analyze functional dependencies, perform normalization, and assign data types.
+**Purpose**: Convert the ER design into a canonical relational schema representation.
 
 **Steps**:
-1. **Functional Dependency Analysis (4.1)**: Extract FDs from NL description and schema
-2. **3NF Normalization (4.2)**: Normalize schema to 3rd Normal Form
-3. **Data Type Assignment (4.3)**: Assign appropriate data types to all attributes
-4. **Categorical Detection (4.4)**: Identify categorical/enum attributes
-5. **Check Constraint Detection (4.5)**: Extract value constraints for categoricals
-6. **Categorical Value Extraction (4.6)**: Extract possible values for categoricals
-7. **Categorical Distribution (4.7)**: Determine value distributions
+1. **Relational Schema Compilation (4.1)**: Convert ER design to normalized relational schema with tables, columns, keys, and constraints
 
 **Output**:
-- Functional dependency list
-- Normalized schema (3NF)
-- Data type assignments
-- Categorical attribute definitions
-- Value distributions
+- Complete relational schema structure
+- Table definitions with columns
+- Primary key and foreign key specifications
+- Constraint definitions
 
 **Key Logic**:
-- FD extraction from both explicit mentions and implicit patterns
-- Automatic 3NF normalization
-- Intelligent data type inference
-- Categorical value extraction and distribution modeling
+- ER-to-relational mapping
+- Handles junction tables for many-to-many relationships
+- Preserves all constraints and relationships
+- Creates canonical schema representation
 
-### Phase 5: DDL & SQL Generation
+### Phase 5: Data Type Assignment
 
-**Purpose**: Generate production-ready DDL statements and validate them.
+**Purpose**: Build attribute dependency graph and assign appropriate data types to all attributes.
 
 **Steps**:
-1. **DDL Compilation (5.1)**: Generate CREATE TABLE statements
-2. **DDL Validation (5.2)**: Validate DDL syntax and semantics
-3. **DDL Error Correction (5.3)**: Fix validation errors (loop if errors found)
-4. **Schema Creation (5.4)**: Optional: Create schema in database
-5. **SQL Query Generation (5.5)**: Generate SQL queries for information needs
+1. **Attribute Dependency Graph Construction (5.1)**: Build dependency graph for attributes (independent, foreign keys, derived)
+2. **Independent Attribute Type Assignment (5.2)**: Assign data types to independent attributes based on domain and usage
+3. **Foreign Key Type Derivation (5.3)**: Derive foreign key types from referenced primary key types
+4. **Dependent Attribute Type Assignment (5.4)**: Assign types to derived and dependent attributes based on dependency graph
+
+**Output**:
+- Attribute dependency graph
+- Complete data type assignments for all attributes
+- Type information per table and column
+- Nullability constraints
+
+**Key Logic**:
+- Dependency-aware type assignment
+- Ensures foreign keys match referenced primary key types
+- Handles derived attributes appropriately
+- Schema is frozen after this phase (no structural changes)
+
+### Phase 6: DDL Generation & Schema Creation
+
+**Purpose**: Generate production-ready DDL statements, validate them, and optionally create the database schema.
+
+**Steps**:
+1. **DDL Compilation (6.1)**: Generate CREATE TABLE statements from relational schema and data types
+2. **DDL Validation (6.2)**: Validate DDL syntax and semantics
+3. **DDL Error Correction (6.3)**: Fix validation errors (iterative loop until no errors)
+4. **Schema Creation (6.4)**: Optional: Create schema in actual database
+5. **SQL Query Generation (6.5)**: Generate SQL queries for information needs (if any)
 
 **Output**:
 - Complete DDL statements
@@ -260,56 +287,83 @@ Each phase is implemented as a LangGraph StateGraph, allowing for:
 
 **Key Logic**:
 - Template-based DDL generation
-- Multi-pass validation
-- Automatic error correction
+- Multi-pass validation with syntax and semantic checks
+- Automatic error correction with iterative refinement
+- Optional database schema creation
 - Query generation from information needs
 
-### Phase 6: Constraints & Distributions
+### Phase 7: Information Mining
 
-**Purpose**: Detect additional constraints and specify data distributions.
+**Purpose**: Extract information needs from natural language description and validate SQL queries (read-only, no schema modification).
 
 **Steps**:
-1. **Constraint Detection (6.1)**: Extract all constraints from NL (loop until no changes)
-2. **Constraint Scope Analysis (6.2)**: Determine scope of each constraint (parallel)
-3. **Constraint Enforcement Strategy (6.3)**: Determine how to enforce constraints (parallel)
-4. **Constraint Conflict Detection (6.4)**: Detect conflicting constraints (loop to 6.3 if conflicts)
-5. **Constraint Compilation (6.5)**: Compile constraint specifications
+1. **Information Need Identification (7.1)**: Extract query requirements from NL description (iterative loop until no new needs)
+2. **SQL Generation and Validation (7.2)**: Generate and validate SQL queries for each information need (batch processing)
 
 **Output**:
-- Complete constraint specifications
-- Enforcement strategies
-- Conflict resolutions
-- Distribution patterns
+- List of information needs/queries
+- Validated SQL query templates
+- Query metadata and validation results
 
 **Key Logic**:
-- Iterative constraint detection
-- Conflict resolution
-- Parallel constraint analysis
-- Distribution pattern extraction (Zipf, log-normal, seasonal, etc.)
+- Iterative information need extraction
+- SQL query generation and validation
+- No schema modification (read-only phase)
+- Batch processing for efficiency
 
-### Phase 7: Generation Strategies
+### Phase 8: Functional Dependencies & Constraints
 
-**Purpose**: Define strategies for generating synthetic data that matches requirements.
+**Purpose**: Analyze functional dependencies, identify categorical columns, and detect comprehensive constraints.
 
 **Steps**:
-1. **Strategy Selection (7.1)**: Select generation strategy per attribute
-2. **Distribution Parameter Extraction (7.2)**: Extract distribution parameters
-3. **Temporal Pattern Detection (7.3)**: Identify temporal patterns (seasonality, trends)
-4. **Relationship Constraints (7.4)**: Define inter-entity constraints for generation
-5. **Validation Rules (7.5)**: Define validation rules for generated data
-6. **Generation Plan (7.6)**: Compile complete generation plan
+1. **Functional Dependency Analysis (8.1)**: Extract functional dependencies from NL description and schema
+2. **Categorical Column Identification (8.2)**: Identify categorical/enum columns (batch processing)
+3. **Categorical Value Identification (8.3)**: Extract possible values for categorical columns (batch processing)
+4. **Constraint Detection (8.4)**: Extract all constraints from NL (iterative loop until no changes)
+5. **Constraint Scope Analysis (8.5)**: Determine scope of each constraint (batch processing, parallel)
+6. **Constraint Enforcement Strategy (8.6)**: Determine how to enforce constraints (batch processing, parallel)
+7. **Constraint Conflict Detection (8.7)**: Detect conflicting constraints (iterative loop if conflicts found)
+8. **Constraint Compilation (8.8)**: Compile constraint specifications into final format
 
 **Output**:
-- Generation strategies per attribute
-- Distribution parameters
-- Temporal patterns
-- Relationship constraints
+- Functional dependency list
+- Categorical column definitions with values
+- Complete constraint specifications (statistical, distribution, other)
+- Enforcement strategies
+- Conflict resolutions
+
+**Key Logic**:
+- FD extraction from both explicit mentions and implicit patterns
+- Batch processing for categorical identification
+- Iterative constraint detection until convergence
+- Parallel constraint analysis for efficiency
+- Conflict detection and resolution
+- Constraint categorization (statistical, distribution, other)
+
+### Phase 9: Constraints & Generation Strategies
+
+**Purpose**: Define generation strategies for independent attributes (excludes derived and constrained columns).
+
+**Steps**:
+1. **Numerical Range Definition (9.1)**: Define ranges and distributions for numerical attributes
+2. **Text Generation Strategy (9.2)**: Define strategies for text/string attributes
+3. **Boolean Dependency Analysis (9.3)**: Analyze dependencies for boolean attributes
+4. **Data Volume Specifications (9.4)**: Specify data volumes and row counts per table
+5. **Partitioning Strategy (9.5)**: Define partitioning strategies for large tables
+6. **Distribution Compilation (9.6)**: Compile complete distribution specifications
+
+**Output**:
+- Generation strategies per independent attribute
+- Distribution parameters (ranges, patterns, etc.)
+- Data volume specifications
+- Partitioning strategies
 - Complete data generation plan
 
 **Key Logic**:
+- Focuses only on independent attributes (excludes derived and constrained columns)
 - Strategy selection based on attribute type and requirements
 - Parameter extraction from NL descriptions
-- Temporal pattern recognition
+- Distribution pattern recognition (Zipf, log-normal, seasonal, etc.)
 - Constraint-aware generation planning
 
 ## Technology Stack
@@ -335,61 +389,158 @@ Each phase is implemented as a LangGraph StateGraph, allowing for:
 - **Vite**: Build tool
 
 ### Pipeline
-- **LangGraph**: State machine orchestration
-- **Custom DSL**: Domain-specific language for derived attributes
-- **Sentence Transformers**: Semantic similarity
-- **Lark**: DSL parsing
+- **LangGraph 1.0.1**: State machine orchestration with checkpointing
+- **LangChain 0.3.27**: LLM integration framework
+- **Custom DSL**: Domain-specific language for derived attributes (Lark parser)
+- **Sentence Transformers**: Semantic similarity for entity consolidation
+- **Lark 1.1.9+**: DSL parsing and validation
+- **Pydantic 2.0+**: Data validation and models
+- **LangSmith**: Observability, tracing, and debugging
 
 ## Project Structure
 
 ```
 Project v4/
-├── backend/                    # FastAPI backend
-│   ├── api/                   # API routes
-│   │   ├── routes/            # REST endpoints
-│   │   └── websocket.py       # WebSocket handler
-│   ├── services/              # Business logic
-│   │   ├── nl2data_service.py # Pipeline integration
-│   │   ├── validation_service.py
-│   │   └── ...
-│   ├── models/                # Pydantic models
-│   ├── utils/                 # Utilities
-│   └── main.py                # FastAPI app entry
+├── backend/                           # FastAPI backend
+│   ├── api/                          # API routes
+│   │   ├── routes/                   # REST endpoints
+│   │   │   ├── processing.py         # Pipeline execution endpoints
+│   │   │   ├── schema.py             # Schema retrieval endpoints
+│   │   │   ├── suggestions.py        # Suggestion endpoints
+│   │   │   └── checkpoints.py        # Checkpoint management
+│   │   └── websocket.py              # WebSocket handler
+│   ├── services/                     # Business logic
+│   │   ├── nl2data_service.py        # Pipeline integration
+│   │   ├── validation_service.py     # Schema validation
+│   │   ├── conversion_service.py     # Format conversion
+│   │   ├── diagram_service.py        # ER diagram generation
+│   │   ├── er_diagram_compiler.py    # ER diagram compilation
+│   │   ├── suggestion_service.py     # AI-powered suggestions
+│   │   └── status_ticker_service.py  # Status updates
+│   ├── models/                       # Pydantic models
+│   │   ├── requests.py               # Request models
+│   │   ├── responses.py              # Response models
+│   │   └── websocket_events.py        # WebSocket event models
+│   ├── utils/                        # Utilities
+│   │   ├── job_manager.py            # Job tracking
+│   │   ├── llm_client.py              # LLM client wrapper
+│   │   └── websocket_manager.py      # WebSocket management
+│   ├── static/                       # Static files
+│   │   └── er_diagrams/              # Generated ER diagrams
+│   ├── tests/                        # Backend tests
+│   ├── config.py                     # Configuration
+│   ├── dependencies.py               # Dependency injection
+│   └── main.py                       # FastAPI app entry
 │
-├── front end/                 # React frontend
+├── front end/                        # React frontend
 │   ├── src/
-│   │   ├── components/       # React components
-│   │   ├── services/         # API clients
-│   │   ├── stores/           # Zustand stores
-│   │   └── types/            # TypeScript types
-│   └── package.json
+│   │   ├── components/              # React components
+│   │   │   ├── checkpoints/         # Checkpoint management UI
+│   │   │   ├── generation/          # Data generation UI
+│   │   │   ├── layout/              # Layout components
+│   │   │   ├── nl-input/            # Natural language input
+│   │   │   ├── progress/            # Progress indicators
+│   │   │   └── schema/              # Schema editors
+│   │   ├── hooks/                   # React hooks
+│   │   │   ├── useAutoSave.ts       # Auto-save functionality
+│   │   │   ├── useSuggestions.ts    # Suggestion hooks
+│   │   │   └── useWebSocket.ts      # WebSocket hooks
+│   │   ├── services/                # API clients
+│   │   │   ├── apiService.ts        # REST API client
+│   │   │   ├── websocketService.ts  # WebSocket client
+│   │   │   └── qualityCalculator.ts # Quality metrics
+│   │   ├── stores/                  # Zustand stores
+│   │   │   └── useAppStore.ts       # Main application store
+│   │   ├── types/                   # TypeScript types
+│   │   │   ├── api.ts               # API types
+│   │   │   ├── schema.ts            # Schema types
+│   │   │   ├── state.ts             # State types
+│   │   │   └── websocket.ts         # WebSocket types
+│   │   ├── utils/                   # Utilities
+│   │   │   ├── constants.ts         # Constants
+│   │   │   ├── helpers.ts           # Helper functions
+│   │   │   └── validation.ts       # Validation utilities
+│   │   ├── App.tsx                  # Main app component
+│   │   └── main.tsx                 # Entry point
+│   ├── package.json                  # Node dependencies
+│   ├── tsconfig.json                # TypeScript config
+│   └── vite.config.ts               # Vite config
 │
-├── NL2DATA/                   # Core pipeline
-│   ├── orchestration/         # LangGraph orchestration
-│   │   ├── graphs/           # Phase graphs
-│   │   ├── state.py          # State management
-│   │   └── step_registry/    # Step definitions
-│   ├── phases/               # Phase implementations
-│   │   ├── phase1/          # Domain & Entity Discovery
-│   │   ├── phase2/          # Attribute Discovery
-│   │   ├── phase3/          # Query Requirements
-│   │   ├── phase4/          # FDs & Data Types
-│   │   ├── phase5/          # DDL Generation
-│   │   ├── phase6/          # Constraints
-│   │   └── phase7/          # Generation Strategies
-│   ├── ir/                   # Intermediate Representation
-│   │   └── models/           # IR data models
-│   ├── utils/                # Utilities
-│   │   ├── llm/              # LLM integration
-│   │   ├── dsl/              # DSL parser/validator
-│   │   ├── tools/            # Validation tools
-│   │   └── ...
-│   ├── config/               # Configuration
-│   └── tests/                # Test suite
+├── NL2DATA/                          # Core pipeline
+│   ├── orchestration/                # LangGraph orchestration
+│   │   ├── graphs/                  # Phase graphs
+│   │   │   ├── master.py            # Master workflow graph
+│   │   │   ├── phase1.py           # Phase 1 graph
+│   │   │   ├── phase2.py            # Phase 2 graph
+│   │   │   ├── phase3.py            # Phase 3 graph
+│   │   │   ├── phase4.py            # Phase 4 graph
+│   │   │   ├── phase5.py            # Phase 5 graph
+│   │   │   ├── phase6.py            # Phase 6 graph
+│   │   │   ├── phase7.py            # Phase 7 graph
+│   │   │   ├── phase8.py            # Phase 8 graph
+│   │   │   ├── phase9.py            # Phase 9 graph
+│   │   │   └── common.py           # Common utilities
+│   │   ├── phase_gates/             # Phase validation gates
+│   │   ├── state.py                 # State management (IRGenerationState)
+│   │   └── step_registry/           # Step definitions registry
+│   ├── phases/                      # Phase implementations
+│   │   ├── phase1/                 # Domain & Entity Discovery
+│   │   │   ├── step_1_1_domain_detection.py
+│   │   │   ├── step_1_2_entity_mention_detection.py
+│   │   │   ├── step_1_4_key_entity_extraction.py
+│   │   │   ├── step_1_5_relation_mention_detection.py
+│   │   │   ├── step_1_6_auxiliary_entity_suggestion.py
+│   │   │   ├── step_1_7_entity_consolidation.py
+│   │   │   ├── step_1_75_entity_relation_reclassification.py
+│   │   │   ├── step_1_8_entity_cardinality.py
+│   │   │   ├── step_1_9_key_relations_extraction.py
+│   │   │   ├── step_1_10_schema_connectivity.py
+│   │   │   ├── step_1_11_relation_cardinality.py
+│   │   │   └── step_1_12_relation_validation.py
+│   │   ├── phase2/                  # Attribute Discovery
+│   │   ├── phase3/                  # ER Design Compilation
+│   │   ├── phase4/                  # Relational Schema Compilation
+│   │   ├── phase5/                  # Data Type Assignment
+│   │   ├── phase6/                  # DDL Generation
+│   │   ├── phase7/                  # Information Mining
+│   │   ├── phase8/                  # Functional Dependencies & Constraints
+│   │   ├── phase9/                  # Generation Strategies
+│   │   └── phase10/                 # Model router utilities
+│   ├── ir/                          # Intermediate Representation
+│   │   ├── compilation/            # IR compilation utilities
+│   │   ├── models/                 # IR data models
+│   │   └── state_utils.py          # State utility functions
+│   ├── utils/                       # Utilities
+│   │   ├── llm/                     # LLM integration
+│   │   │   ├── chain_utils.py       # LangChain utilities
+│   │   │   ├── json_schema_fix.py   # JSON schema fixes
+│   │   │   └── model_router.py      # Model routing
+│   │   ├── dsl/                     # DSL parser/validator
+│   │   ├── tools/                   # Validation tools
+│   │   ├── validation/              # Validation utilities
+│   │   ├── similarity/              # Semantic similarity
+│   │   ├── fd/                      # Functional dependency utilities
+│   │   ├── nl/                      # Natural language processing
+│   │   ├── logging/                 # Logging setup
+│   │   ├── observability/           # LangSmith integration
+│   │   ├── rate_limiting/           # Rate limiting
+│   │   ├── error_handling/          # Error handling
+│   │   ├── loops/                   # Loop execution utilities
+│   │   ├── context_manager/         # Context management
+│   │   ├── cost_tracking/           # Cost tracking
+│   │   ├── data_types/              # Data type utilities
+│   │   ├── distributions/           # Distribution utilities
+│   │   └── env/                     # Environment utilities
+│   ├── config/                      # Configuration
+│   │   ├── config.yaml              # Main configuration file
+│   │   └── loader.py                # Config loader
+│   ├── runs/                        # Execution runs (checkpoints)
+│   ├── logs/                         # Log files
+│   └── tests/                        # Test suite
 │
-├── requirements.txt          # Python dependencies
-├── nl_descriptions.txt       # Example NL descriptions
-└── README.md                # This file
+├── requirements.txt                  # Python dependencies
+├── nl_descriptions.txt               # Example NL descriptions
+└── README.md                         # This file
 ```
 
 ## Installation & Setup
@@ -408,8 +559,36 @@ pip install -r requirements.txt
 
 2. **Set environment variables**:
 ```bash
+# Required
 export OPENAI_API_KEY="your-api-key-here"
-export LANGCHAIN_API_KEY="your-langsmith-key"  # Optional, for tracing
+
+# Optional - for observability and tracing
+export LANGCHAIN_API_KEY="your-langsmith-key"
+export LANGCHAIN_PROJECT="nl2data-project"  # LangSmith project name
+export LANGCHAIN_TRACING_V2="true"  # Enable LangSmith tracing
+
+# Optional - for debugging
+export PYTHONUNBUFFERED="1"  # Unbuffered output for immediate logs
+```
+
+**Windows (PowerShell)**:
+```powershell
+$env:OPENAI_API_KEY="your-api-key-here"
+$env:LANGCHAIN_API_KEY="your-langsmith-key"
+```
+
+**Windows (CMD)**:
+```cmd
+set OPENAI_API_KEY=your-api-key-here
+set LANGCHAIN_API_KEY=your-langsmith-key
+```
+
+Alternatively, create a `.env` file in the project root:
+```
+OPENAI_API_KEY=your-api-key-here
+LANGCHAIN_API_KEY=your-langsmith-key
+LANGCHAIN_PROJECT=nl2data-project
+LANGCHAIN_TRACING_V2=true
 ```
 
 3. **Run backend server**:
@@ -438,25 +617,60 @@ The frontend will start on `http://localhost:5173`
 ### Configuration
 
 Edit `NL2DATA/config/config.yaml` to customize:
-- Model selection (default: gpt-4o-mini)
-- Temperature settings
-- Max tokens per task type
-- Rate limiting
-- Logging levels
+
+**OpenAI Configuration**:
+- Model selection per task type (default: gpt-4o-mini for all)
+- Temperature settings (default: 0 for determinism)
+- Max tokens per task type (ranges from 4000 to 16000)
+- Timeout per task type (ranges from 120 to 300 seconds)
+
+**LangChain Configuration**:
+- Max retries for failed LLM calls (default: 3)
+- Retry delay with exponential backoff (default: 1.0s)
+- Response caching (default: enabled)
+- Streaming support (default: enabled)
+
+**Phase Configuration**:
+- Max iterations for iterative refinement loops (default: 10)
+- Checkpoint interval (default: 1, saves after every step)
+
+**Rate Limiting**:
+- Requests per minute (default: 500)
+- Tokens per minute (default: 1,000,000)
+- Max concurrent requests (default: 10)
+- Per-step-type concurrency limits
+
+**Logging**:
+- Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- Log format (simple or detailed)
+- File logging (enabled by default)
+- Log file path
+
+**Validation**:
+- Strict mode (default: enabled)
+- SQL validation (default: enabled)
+- IR structure validation (default: enabled)
+
+**Cost Tracking**:
+- Cost tracking (default: enabled)
+- Budget limit (optional, null = no limit)
 
 ## Usage
 
 ### Web Interface
 
-1. Open the frontend in your browser
+1. Open the frontend in your browser (typically `http://localhost:5173`)
 2. Enter a natural language description of your database requirements
 3. Click "Generate Schema"
 4. Monitor real-time progress via WebSocket updates
-5. View generated ER diagram and relational schema
-6. Edit schema if needed
-7. Export DDL statements
+5. Review and edit schema at checkpoints (domain, entities, relations, attributes, etc.)
+6. View generated ER diagram and relational schema
+7. Edit schema components as needed
+8. Export DDL statements
 
 ### API Usage
+
+#### Processing Endpoints
 
 **Start Processing**:
 ```bash
@@ -467,22 +681,166 @@ curl -X POST http://localhost:8000/api/process/start \
   }'
 ```
 
+Response:
+```json
+{
+  "job_id": "uuid-here",
+  "status": "started",
+  "created_at": "2024-01-01T12:00:00Z"
+}
+```
+
 **Get Status**:
 ```bash
 curl http://localhost:8000/api/process/status/{job_id}
 ```
 
-**WebSocket Connection**:
+Response:
+```json
+{
+  "job_id": "uuid-here",
+  "status": "running",
+  "phase": 3,
+  "current_step": "3.1",
+  "progress": 0.45
+}
+```
+
+#### Checkpoint Endpoints
+
+The system uses checkpoint-based execution, allowing users to review and edit results at key stages:
+
+**Get Checkpoint Data**:
+```bash
+curl http://localhost:8000/api/checkpoint/{job_id}/{checkpoint_type}
+```
+
+Available checkpoint types:
+- `domain`: After domain detection
+- `entities`: After entity extraction
+- `relations`: After relation extraction
+- `attributes`: After attribute discovery
+- `primary_keys`: After primary key identification
+- `multivalued_derived`: After multivalued/derived detection
+- `nullability`: After nullability constraints
+- `er_diagram`: After ER design compilation
+- `datatypes`: After data type assignment
+- `relational_schema`: After relational schema compilation
+- `information_mining`: After information need identification
+- `functional_dependencies`: After FD analysis
+- `constraints`: After constraint detection
+- `generation_strategies`: After generation strategy definition
+
+**Edit Checkpoint Data**:
+```bash
+curl -X POST http://localhost:8000/api/checkpoint/{job_id}/{checkpoint_type}/edit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "domain": "e-commerce",
+    "has_explicit_domain": true
+  }'
+```
+
+**Proceed from Checkpoint**:
+```bash
+curl -X POST http://localhost:8000/api/checkpoint/{job_id}/proceed \
+  -H "Content-Type: application/json" \
+  -d '{
+    "checkpoint_type": "domain",
+    "proceed_to": "entities"
+  }'
+```
+
+#### Schema Endpoints
+
+**Get Schema**:
+```bash
+curl http://localhost:8000/api/schema/{job_id}
+```
+
+**Get ER Diagram**:
+```bash
+curl http://localhost:8000/api/schema/{job_id}/er-diagram
+```
+
+**Get Distribution Metadata**:
+```bash
+curl http://localhost:8000/api/schema/distributions/metadata
+```
+
+**Save Schema Changes**:
+```bash
+curl -X POST http://localhost:8000/api/schema/{job_id}/save \
+  -H "Content-Type: application/json" \
+  -d '{
+    "changes": { ... }
+  }'
+```
+
+#### Suggestions Endpoint
+
+**Get Suggestions**:
+```bash
+curl -X POST http://localhost:8000/api/suggestions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "nl_description": "Create a database...",
+    "context": "I need help with..."
+  }'
+```
+
+#### WebSocket Connection
+
+Real-time progress updates are delivered via WebSocket:
+
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws');
+const ws = new WebSocket(`ws://localhost:8000/ws/connect/${job_id}`);
+
 ws.onmessage = (event) => {
   const update = JSON.parse(event.data);
-  console.log('Progress:', update);
+  
+  switch (update.type) {
+    case 'progress':
+      console.log('Progress:', update.data);
+      break;
+    case 'step_complete':
+      console.log('Step completed:', update.data);
+      break;
+    case 'phase_complete':
+      console.log('Phase completed:', update.data);
+      break;
+    case 'checkpoint':
+      console.log('Checkpoint reached:', update.data);
+      break;
+    case 'error':
+      console.error('Error:', update.data);
+      break;
+    case 'complete':
+      console.log('Pipeline completed:', update.data);
+      break;
+  }
+};
+
+ws.onerror = (error) => {
+  console.error('WebSocket error:', error);
+};
+
+ws.onclose = () => {
+  console.log('WebSocket closed');
 };
 ```
 
+**WebSocket Event Types**:
+- `progress`: Step-by-step progress updates
+- `step_complete`: Individual step completion
+- `phase_complete`: Phase completion
+- `checkpoint`: Checkpoint reached (user can review/edit)
+- `error`: Error occurred during processing
+- `complete`: Pipeline execution completed
+
 ### Programmatic Usage
 
+**Complete Pipeline Execution**:
 ```python
 from NL2DATA.orchestration.graphs.master import create_complete_workflow_graph
 from NL2DATA.orchestration.state import create_initial_state
@@ -500,6 +858,56 @@ final_state = await workflow.ainvoke(state)
 # Access results
 entities = final_state.get("entities", [])
 ddl_statements = final_state.get("ddl_statements", [])
+relational_schema = final_state.get("metadata", {}).get("relational_schema", {})
+generation_strategies = final_state.get("generation_strategies", {})
+```
+
+**Execute Up to Specific Phase**:
+```python
+from NL2DATA.orchestration.graphs.master import create_workflow_up_to_phase
+
+# Create workflow up to Phase 5
+workflow = create_workflow_up_to_phase(max_phase=5)
+
+# Execute
+state = create_initial_state(nl_description)
+result = await workflow.ainvoke(state)
+```
+
+**Execute Single Phase**:
+```python
+from NL2DATA.orchestration.graphs.master import get_phase_graph
+
+# Get Phase 1 graph
+phase_1_graph = get_phase_graph(phase=1)
+
+# Execute Phase 1 only
+state = create_initial_state(nl_description)
+result = await phase_1_graph.ainvoke(state)
+```
+
+**With Checkpointing**:
+```python
+from langgraph.checkpoint.memory import MemorySaver
+from NL2DATA.orchestration.graphs.master import create_complete_workflow_graph
+
+# Create workflow with checkpointing
+checkpointer = MemorySaver()
+workflow = create_complete_workflow_graph()  # Already includes MemorySaver
+
+# Execute with config for checkpointing
+config = {"configurable": {"thread_id": "run-1"}}
+state = create_initial_state(nl_description)
+
+# Execute pipeline (checkpoints saved automatically)
+final_state = await workflow.ainvoke(state, config=config)
+
+# Restore from checkpoint
+from langgraph.graph import START
+checkpoint = checkpointer.get(config)
+if checkpoint:
+    # Resume from checkpoint
+    pass
 ```
 
 ## Key Features
@@ -518,12 +926,31 @@ ddl_statements = final_state.get("ddl_statements", [])
 - Cross-entity attribute reconciliation
 
 ### 3. DSL for Derived Attributes
-Custom domain-specific language for expressing derived attributes:
+Custom domain-specific language for expressing derived attributes and composite decompositions:
+
+**Derived Attribute Examples**:
 ```
 distance_miles = distance_km * 0.621371
 gross_fare = distance_km * base_fare_per_km * surge_multiplier + booking_fee
 fraud_risk_score = base_risk_score + 0.5 * is_cross_border + 0.7 * high_risk_mcc_flag
+total_price = quantity * unit_price * (1 - discount_rate)
+age_years = (current_date - birth_date) / 365.25
 ```
+
+**DSL Features**:
+- Arithmetic operations: `+`, `-`, `*`, `/`, `%`
+- Comparison operations: `==`, `!=`, `<`, `>`, `<=`, `>=`
+- Logical operations: `and`, `or`, `not`
+- Conditional expressions: `if condition then value1 else value2`
+- Function calls: `sqrt(x)`, `abs(x)`, `round(x, decimals)`
+- Attribute references: `Entity.attribute_name`
+- Constants and literals: numbers, strings, booleans
+
+**DSL Validation**:
+- Syntax validation using Lark parser
+- Semantic validation (attribute existence, type checking)
+- Dependency cycle detection
+- Error reporting with line numbers and context
 
 ### 4. Functional Dependency Analysis
 - Automatic FD extraction from NL descriptions
@@ -549,6 +976,20 @@ fraud_risk_score = base_risk_score + 0.5 * is_cross_border + 0.7 * high_risk_mcc
 - Multi-level validation (syntax, semantics, constraints)
 - Automatic error correction loops
 - Comprehensive error reporting
+- Phase gates for state validation
+- Schema freeze after Phase 4 (no structural changes)
+
+### 9. Checkpoint-Based Execution
+- Review and edit results at key stages
+- Step-by-step pipeline execution
+- User-controlled progression
+- State persistence and restoration
+
+### 10. Real-time Observability
+- LangSmith integration for tracing
+- Comprehensive logging at multiple levels
+- Cost tracking and budget management
+- Performance metrics and timing
 
 ## Implementation Details
 
@@ -558,19 +999,68 @@ The pipeline uses a centralized `IRGenerationState` TypedDict that accumulates i
 
 ```python
 class IRGenerationState(TypedDict, total=False):
-    nl_description: str
-    phase: int
-    entities: List[Dict[str, Any]]
-    relations: List[Dict[str, Any]]
-    attributes: Dict[str, List[Dict[str, Any]]]
-    primary_keys: Dict[str, List[str]]
-    foreign_keys: List[Dict[str, Any]]
-    functional_dependencies: List[Dict[str, Any]]
-    ddl_statements: List[str]
-    # ... and more
+    # Input
+    nl_description: str  # Original natural language description
+    
+    # Phase tracking
+    phase: int  # Current phase (1-9)
+    current_step: str  # Current step identifier (e.g., "1.4")
+    
+    # Phase 1: Domain & Entity Discovery
+    domain: Optional[str]  # Detected or inferred domain
+    has_explicit_domain: Optional[bool]  # Whether domain was explicitly mentioned
+    entities: List[Dict[str, Any]]  # List of entities
+    relations: List[Dict[str, Any]]  # List of relationships
+    entity_cardinalities: Dict[str, Dict[str, str]]  # entity -> cardinality info
+    relation_cardinalities: Dict[str, Dict[str, Any]]  # relation_id -> cardinality info
+    
+    # Phase 2: Attribute Discovery & Schema Design
+    attributes: Dict[str, List[Dict[str, Any]]]  # entity -> list of attributes
+    primary_keys: Dict[str, List[str]]  # entity -> list of PK attribute names
+    foreign_keys: List[Dict[str, Any]]  # List of foreign key definitions
+    constraints: Annotated[List[Dict[str, Any]], add]  # Accumulated constraints
+    derived_formulas: Dict[str, Dict[str, Any]]  # "Entity.attribute" -> formula DSL
+    derived_metrics: Dict[str, Dict[str, Any]]  # Derived metric definitions
+    composite_decompositions: Dict[str, Any]  # Composite attribute decompositions
+    
+    # Phase 3: Query Requirements & Schema Refinement
+    information_needs: Annotated[List[Dict[str, Any]], add]  # Accumulated information needs
+    sql_queries: Annotated[List[Dict[str, Any]], add]  # Accumulated SQL queries
+    junction_table_names: Dict[str, str]  # relation_key -> suggested table name
+    
+    # Phase 4: Functional Dependencies & Data Types
+    functional_dependencies: Annotated[List[Dict[str, Any]], add]  # Accumulated FDs
+    data_types: Dict[str, Dict[str, Dict[str, Any]]]  # entity -> attribute -> type info
+    categorical_attributes: Dict[str, List[str]]  # entity -> list of categorical attrs
+    
+    # Phase 5: DDL & SQL Generation
+    ddl_statements: Annotated[List[str], add]  # Accumulated DDL statements
+    ddl_validation_errors: List[Dict[str, Any]]  # DDL validation errors
+    
+    # Phase 6: Constraints & Distributions
+    constraint_specs: Annotated[List[Dict[str, Any]], add]  # Accumulated constraint specs
+    
+    # Phase 7: Generation Strategies
+    generation_strategies: Dict[str, Dict[str, Dict[str, Any]]]  # entity -> attribute -> strategy
+    
+    # Metadata & Tracking
+    errors: Annotated[List[Dict[str, Any]], add]  # Accumulated errors
+    warnings: Annotated[List[str], add]  # Accumulated warnings
+    previous_answers: Dict[str, Any]  # Answers from previous steps (for context)
+    metadata: Annotated[Dict[str, Any], or_]  # Flexible metadata storage (merged with dict union)
+    
+    # Loop tracking
+    loop_iterations: Dict[str, int]  # step_id -> iteration count
+    loop_termination_reasons: Dict[str, str]  # step_id -> termination reason
 ```
 
-State is passed between phases and updated incrementally. Fields marked with `Annotated[List, add]` are automatically merged when multiple nodes update them.
+**Key State Features**:
+- **Incremental Building**: Fields are optional (`total=False`) to allow incremental state building
+- **Automatic Merging**: Fields marked with `Annotated[List, add]` are automatically merged when multiple nodes update them
+- **Metadata Merging**: The `metadata` field uses `Annotated[Dict, or_]` to merge dictionaries using union
+- **Phase Gates**: State is validated at phase boundaries using phase gates
+- **Schema Freeze**: After Phase 4, the schema structure is frozen (no structural changes allowed)
+- **Checkpointing**: State can be saved and restored using LangGraph checkpoints
 
 ### LangGraph Orchestration
 
@@ -641,7 +1131,72 @@ Configurable rate limiting to prevent API overload:
 - Requests per minute: 500
 - Tokens per minute: 1,000,000
 - Max concurrent requests: 10
-- Per-step-type concurrency limits
+- Per-step-type concurrency limits:
+  - Per-entity operations: 5 concurrent
+  - Per-relation operations: 3 concurrent
+  - Per-attribute operations: 10 concurrent
+  - Per-information operations: 5 concurrent
+
+### Checkpointing System
+
+The pipeline uses a checkpoint-based execution model that allows users to review and edit results at key stages:
+
+**Checkpoint Types**:
+1. **Domain Checkpoint**: After domain detection (Step 1.1)
+2. **Entities Checkpoint**: After entity extraction (Step 1.4)
+3. **Relations Checkpoint**: After relation extraction (Step 1.9)
+4. **Attributes Checkpoint**: After attribute discovery (Step 2.2)
+5. **Primary Keys Checkpoint**: After primary key identification (Step 2.7)
+6. **Multivalued/Derived Checkpoint**: After multivalued/derived detection (Step 2.8)
+7. **Nullability Checkpoint**: After nullability constraints (Step 2.11)
+8. **ER Diagram Checkpoint**: After ER design compilation (Step 3.1)
+9. **Data Types Checkpoint**: After data type assignment (Phase 5)
+10. **Relational Schema Checkpoint**: After relational schema compilation (Step 4.1)
+11. **Information Mining Checkpoint**: After information need identification (Step 7.1)
+12. **Functional Dependencies Checkpoint**: After FD analysis (Step 8.1)
+13. **Constraints Checkpoint**: After constraint detection (Step 8.4)
+14. **Generation Strategies Checkpoint**: After generation strategy definition (Phase 9)
+
+**Checkpoint Workflow**:
+1. Pipeline executes to checkpoint
+2. State is saved and checkpoint data is extracted
+3. User receives checkpoint notification via WebSocket
+4. User can review and edit checkpoint data via API
+5. User proceeds to next checkpoint or continues pipeline
+6. Pipeline resumes from checkpoint with any edits applied
+
+**State Persistence**:
+- LangGraph MemorySaver for checkpoint storage
+- State can be restored from any checkpoint
+- Supports resuming interrupted executions
+- Enables iterative refinement workflows
+
+### Phase Gates
+
+Each phase includes validation gates that ensure state integrity:
+
+**Phase Gate Checks**:
+- Required fields are present
+- Data structures are valid
+- No duplicate entity/relation names
+- Referential integrity (foreign keys reference valid entities)
+- Schema consistency
+- Type correctness
+
+**Gate Failures**:
+- Phase gates raise exceptions if validation fails
+- Errors are logged with detailed information
+- Pipeline execution stops at failed gate
+- User can review errors and fix issues before proceeding
+
+### Schema Freeze
+
+After Phase 4 (Relational Schema Compilation), the schema structure is frozen:
+- No new entities can be added
+- No new relations can be added
+- No structural changes to existing entities/relations
+- Only data types, constraints, and generation strategies can be modified
+- Ensures consistency across later phases
 
 ## Testing
 
@@ -650,29 +1205,38 @@ Configurable rate limiting to prevent API overload:
 ```bash
 # Run all tests
 cd NL2DATA
-python -m pytest tests/
+python -m pytest tests/ -v
 
 # Run specific phase tests
-python -m pytest tests/phase1/
-python -m pytest tests/phase2/
+python -m pytest tests/phase1/ -v
+python -m pytest tests/phase2/ -v
 
-# Run integration tests
-python -m pytest tests/integration_test.py
+# Run with coverage
+python -m pytest tests/ --cov=NL2DATA --cov-report=html
 
-# Run stress tests
-python tests/stress/run_phase1_stress.py
+# Run specific test file
+python -m pytest tests/phase1/test_step_1_1.py -v
+
+# Run tests matching pattern
+python -m pytest tests/ -k "test_entity" -v
 ```
 
 ### Test Structure
 
-- **Unit tests**: Individual step testing
-- **Phase tests**: Complete phase execution
-- **Integration tests**: End-to-end pipeline testing
-- **Stress tests**: Performance and scalability testing
+- **Unit tests**: Individual step testing (`tests/phase*/test_step_*.py`)
+- **Phase tests**: Complete phase execution (`tests/phase*/test_phase_*.py`)
+- **Integration tests**: End-to-end pipeline testing (`tests/integration/`)
+- **Stress tests**: Performance and scalability testing (`tests/stress/`)
+- **Backend tests**: API and service tests (`backend/tests/`)
 
 ### Example Test
 
 ```python
+import pytest
+from NL2DATA.orchestration.graphs.phase1 import create_phase_1_graph
+from NL2DATA.orchestration.state import create_initial_state
+
+@pytest.mark.asyncio
 async def test_phase_1_integration():
     nl_description = "Create a database for IoT sensors..."
     state = create_initial_state(nl_description)
@@ -682,6 +1246,116 @@ async def test_phase_1_integration():
     
     assert len(result["entities"]) > 0
     assert len(result["relations"]) > 0
+    assert result.get("domain") is not None
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**1. OpenAI API Errors**:
+- **Issue**: `Rate limit exceeded` or `Invalid API key`
+- **Solution**: 
+  - Check your API key is set correctly: `echo $OPENAI_API_KEY`
+  - Verify API key has sufficient credits
+  - Adjust rate limiting in `config.yaml` if needed
+  - Check rate limits in OpenAI dashboard
+
+**2. Import Errors**:
+- **Issue**: `ModuleNotFoundError: No module named 'NL2DATA'`
+- **Solution**: 
+  - Ensure you're in the project root directory
+  - Install dependencies: `pip install -r requirements.txt`
+  - Use Python 3.13+ (check with `python --version`)
+  - Activate virtual environment if using one
+
+**3. WebSocket Connection Issues**:
+- **Issue**: WebSocket fails to connect or disconnects frequently
+- **Solution**:
+  - Check backend is running on port 8000
+  - Verify CORS settings in `backend/config.py`
+  - Check firewall settings
+  - Review WebSocket logs in backend console
+
+**4. Phase Gate Failures**:
+- **Issue**: `Phase X gate failed: ...`
+- **Solution**:
+  - Review error message for specific validation failure
+  - Check state at previous phase for missing/invalid data
+  - Review logs for detailed error information
+  - May need to adjust NL description or fix state manually
+
+**5. Memory Issues**:
+- **Issue**: Out of memory errors during execution
+- **Solution**:
+  - Reduce max concurrent requests in `config.yaml`
+  - Process smaller NL descriptions
+  - Increase system memory or use swap
+  - Check for memory leaks in logs
+
+**6. Checkpoint Not Found**:
+- **Issue**: `Checkpoint not found` error
+- **Solution**:
+  - Verify job_id is correct
+  - Check checkpoint was actually created (review logs)
+  - Ensure checkpoint type matches available checkpoints
+  - Check checkpoint storage (MemorySaver) is working
+
+### Debugging Tips
+
+**Enable Debug Logging**:
+```yaml
+# NL2DATA/config/config.yaml
+logging:
+  level: "DEBUG"
+  format: "detailed"
+```
+
+**Check LangSmith Traces**:
+- Enable LangSmith tracing with `LANGCHAIN_TRACING_V2=true`
+- View traces in LangSmith dashboard
+- Analyze LLM calls and responses
+- Identify bottlenecks and errors
+
+**Review Logs**:
+- Backend logs: Console output and `NL2DATA/logs/nl2data.log`
+- Frontend logs: Browser console (F12)
+- WebSocket logs: Backend console output
+
+**Test Individual Steps**:
+```python
+from NL2DATA.phases.phase1.step_1_1_domain_detection import step_1_1_domain_detection
+
+result = await step_1_1_domain_detection("Create an e-commerce database...")
+print(result)
+```
+
+## Distribution Catalog
+
+The system includes a comprehensive distribution catalog for data generation strategies:
+
+**Available Distributions**:
+- **Uniform**: Uniform distribution between min and max
+- **Normal**: Normal (Gaussian) distribution
+- **Log-normal**: Log-normal distribution
+- **Exponential**: Exponential distribution
+- **Poisson**: Poisson distribution
+- **Zipf**: Zipf distribution (power law)
+- **Beta**: Beta distribution
+- **Gamma**: Gamma distribution
+- **Weibull**: Weibull distribution
+- **Categorical**: Discrete categorical distribution
+- **Seasonal**: Seasonal patterns with time-based variations
+- **Trend**: Linear or polynomial trends
+- **Custom**: User-defined distributions
+
+**Distribution Parameters**:
+Each distribution has specific parameters (e.g., mean, stddev for Normal; shape, scale for Gamma).
+The frontend dynamically generates parameter input forms based on selected distribution.
+
+**Accessing Distribution Metadata**:
+```bash
+curl http://localhost:8000/api/schema/distributions/metadata
 ```
 
 ## Contributing
@@ -693,6 +1367,14 @@ This project follows a modular architecture. When adding new features:
 3. **Follow the state pattern**: Update `IRGenerationState` for new data
 4. **Add tests**: Include unit and integration tests
 5. **Update documentation**: Keep this README and code comments up to date
+6. **Follow naming conventions**: 
+   - Step files: `step_{phase}_{step_number}_{description}.py`
+   - Graph files: `phase{number}.py`
+   - Use descriptive function and variable names
+7. **Add phase gates**: Ensure new phases include appropriate validation gates
+8. **Handle errors gracefully**: Use proper error handling and logging
+9. **Update configuration**: Add new config options to `config.yaml` if needed
+10. **Maintain backward compatibility**: Avoid breaking changes to state structure
 
 ## License
 
