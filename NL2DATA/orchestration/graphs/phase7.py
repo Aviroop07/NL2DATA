@@ -56,9 +56,10 @@ def create_phase_7_graph() -> StateGraph:
         else:
             information_needs_list = []
         return {
-            **state,
             "information_needs": information_needs_list,
             "previous_answers": {**state.get("previous_answers", {}), "7.1": result},
+            "current_step": "7.1",
+            "phase": 7,
         }
     
     async def sql_validation(state: IRGenerationState) -> Dict[str, Any]:
@@ -71,7 +72,11 @@ def create_phase_7_graph() -> StateGraph:
         
         if not information_needs:
             logger.info("No information needs found, skipping SQL validation")
-            return {**state, "validated_information_needs": [], "previous_answers": {**state.get("previous_answers", {}), "7.2": {}}}
+            return {
+                "validated_information_needs": [],
+                "previous_answers": {**state.get("previous_answers", {}), "7.2": {}},
+                "current_step": "7.2",
+            }
         
         result = await invoke_step_checked(
             step_7_2_sql_generation_and_validation_batch,
@@ -90,9 +95,9 @@ def create_phase_7_graph() -> StateGraph:
         else:
             validated_needs = []
         return {
-            **state,
             "validated_information_needs": validated_needs,
             "previous_answers": {**state.get("previous_answers", {}), "7.2": result},
+            "current_step": "7.2",
         }
     
     workflow.add_node("information_needs", information_needs)

@@ -139,9 +139,16 @@ def fix_json_schema_for_openai(schema: Dict[str, Any]) -> Dict[str, Any]:
                 prop_schema = _sanitize_for_json(prop_schema) if prop_schema is not None else prop_schema
                 fixed_prop = fix_json_schema_for_openai(prop_schema) if isinstance(prop_schema, dict) else prop_schema
                 # Ensure all object types have additionalProperties: false
-                if isinstance(fixed_prop, dict) and fixed_prop.get("type") == "object":
-                    # Always set additionalProperties to false for OpenAI compatibility
-                    fixed_prop["additionalProperties"] = False
+                if isinstance(fixed_prop, dict):
+                    if fixed_prop.get("type") == "object":
+                        # Always set additionalProperties to false for OpenAI compatibility
+                        if "additionalProperties" not in fixed_prop:
+                            fixed_prop["additionalProperties"] = False
+                    # Also check if the property schema itself needs additionalProperties (for Dict fields)
+                    # If it's an object type without explicit type key, it might still need additionalProperties
+                    if "type" not in fixed_prop and "properties" in fixed_prop:
+                        # This is an object type (has properties), ensure additionalProperties: false
+                        fixed_prop["additionalProperties"] = False
                 # Handle anyOf/oneOf/allOf at property level (e.g., Optional[List[Dict]] creates anyOf with array option)
                 if isinstance(fixed_prop, dict):
                     for key in ["anyOf", "oneOf", "allOf"]:

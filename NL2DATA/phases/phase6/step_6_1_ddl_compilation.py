@@ -79,7 +79,7 @@ def step_6_1_ddl_compilation(
     check_constraints: Optional[Dict[str, Dict[str, List[str]]]] = None,  # entity -> attribute -> values
 ) -> DDLCompilationOutput:
     """
-    Step 10.1 (deterministic): Generate CREATE TABLE statements from normalized schema.
+    Step 6.1 (deterministic): Generate CREATE TABLE statements from normalized schema.
     
     This is a deterministic transformation that converts the normalized LogicalIR schema
     into executable SQL DDL statements. No LLM call needed.
@@ -106,11 +106,12 @@ def step_6_1_ddl_compilation(
         >>> "CREATE TABLE" in result["ddl_statements"][0]
         True
     """
-    logger.info("Starting Step 10.1: DDL Compilation (deterministic)")
+    logger.info("Starting Step 6.1: DDL Compilation (deterministic)")
     
-    normalized_tables = normalized_schema.get("normalized_tables", [])
+    # Phase 4 outputs "tables", but we also support "normalized_tables" for compatibility
+    normalized_tables = normalized_schema.get("normalized_tables", normalized_schema.get("tables", []))
     if not normalized_tables:
-        logger.warning("No normalized tables found in schema")
+        logger.warning(f"No normalized tables found in schema. Schema keys: {list(normalized_schema.keys())}")
         return DDLCompilationOutput(ddl_statements=[])
     
     # Build a lookup map of table names to their column names for validation

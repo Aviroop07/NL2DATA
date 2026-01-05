@@ -91,9 +91,10 @@ def create_phase_8_graph() -> StateGraph:
                 all_fds.extend(fds)
         
         return {
-            **state,
             "functional_dependencies": all_fds,
-            "previous_answers": {**state.get("previous_answers", {}), "8.1": result}
+            "previous_answers": {**state.get("previous_answers", {}), "8.1": result},
+            "current_step": "8.1",
+            "phase": 8,
         }
     
     # Step 8.2: Categorical Column Identification
@@ -137,9 +138,9 @@ def create_phase_8_graph() -> StateGraph:
                 categorical_attributes[entity_name] = []
         
         return {
-            **state,
             "categorical_attributes": categorical_attributes,
-            "previous_answers": {**state.get("previous_answers", {}), "8.2": result}
+            "previous_answers": {**state.get("previous_answers", {}), "8.2": result},
+            "current_step": "8.2",
         }
     
     # Step 8.3: Categorical Value Identification (after 8.2)
@@ -152,9 +153,9 @@ def create_phase_8_graph() -> StateGraph:
         if not categorical_attributes:
             logger.warning("No categorical attributes found in state. Step 8.2 may not have run yet. Proceeding with empty categorical values.")
             return {
-                **state,
                 "categorical_values": {},
-                "previous_answers": {**state.get("previous_answers", {}), "8.3": {}}
+                "previous_answers": {**state.get("previous_answers", {}), "8.3": {}},
+                "current_step": "8.3",
             }
         
         logger.info(f"Processing categorical value identification for {len(categorical_attributes)} entities with categorical attributes")
@@ -183,9 +184,9 @@ def create_phase_8_graph() -> StateGraph:
         )
         
         return {
-            **state,
             "categorical_values": result,
-            "previous_answers": {**state.get("previous_answers", {}), "8.3": result}
+            "previous_answers": {**state.get("previous_answers", {}), "8.3": result},
+            "current_step": "8.3",
         }
     
     # Constraint detection steps (8.4-8.8)
@@ -215,7 +216,11 @@ def create_phase_8_graph() -> StateGraph:
             derived_formulas=derived_formulas if derived_formulas else None,
             multivalued_derived=multivalued_derived if multivalued_derived else None,
         )
-        return {**state, "constraints": result.get("constraints", []), "previous_answers": {**state.get("previous_answers", {}), "8.4": result}}
+        return {
+            "constraints": result.get("constraints", []),
+            "previous_answers": {**state.get("previous_answers", {}), "8.4": result},
+            "current_step": "8.4",
+        }
     
     async def constraint_scope(state: IRGenerationState) -> Dict[str, Any]:
         logger.info("[LangGraph] Executing Step 8.5: Constraint Scope Analysis")
@@ -240,11 +245,12 @@ def create_phase_8_graph() -> StateGraph:
             merged = {**constraint, **scope_dict}
             constraints_with_scope.append(merged)
         return {
-            **state,
+            "constraints": constraints_with_scope,
             "previous_answers": {
                 **state.get("previous_answers", {}),
                 "8.5": constraints_with_scope
-            }
+            },
+            "current_step": "8.5",
         }
     
     async def constraint_enforcement(state: IRGenerationState) -> Dict[str, Any]:
@@ -286,14 +292,11 @@ def create_phase_8_graph() -> StateGraph:
                 }
                 constraints_with_enforcement.append(merged_constraint)
         
-        # Update constraints in state with enforcement info
-        updated_state = {
-            **state,
+        return {
             "constraints": constraints_with_enforcement if constraints_with_enforcement else state.get("constraints", []),
-            "previous_answers": {**state.get("previous_answers", {}), "8.6": result}
+            "previous_answers": {**state.get("previous_answers", {}), "8.6": result},
+            "current_step": "8.6",
         }
-        
-        return updated_state
     
     async def constraint_conflict(state: IRGenerationState) -> Dict[str, Any]:
         logger.info("[LangGraph] Executing Step 8.7: Constraint Conflict Detection")
@@ -322,16 +325,20 @@ def create_phase_8_graph() -> StateGraph:
         elif isinstance(result, dict):
             resolution_applied = result.get("resolution_applied", False)
         
-        updated_state = {**state, "previous_answers": {**state.get("previous_answers", {}), "8.7": result}}
+        # Build update dict
+        update_dict = {
+            "previous_answers": {**state.get("previous_answers", {}), "8.7": result},
+            "current_step": "8.7",
+        }
         
         # Update constraints if resolution was applied
         if resolution_applied and resolved_constraints:
             logger.info(f"Updating constraints with resolved version: {len(resolved_constraints)} constraints (from {len(constraints)} original)")
-            updated_state["constraints"] = resolved_constraints
+            update_dict["constraints"] = resolved_constraints
         elif resolution_applied:
             logger.warning("Resolution was applied but no resolved constraints returned, keeping original constraints")
         
-        return updated_state
+        return update_dict
     
     async def constraint_compilation(state: IRGenerationState) -> Dict[str, Any]:
         logger.info("[LangGraph] Executing Step 8.8: Constraint Compilation")
@@ -340,12 +347,12 @@ def create_phase_8_graph() -> StateGraph:
         
         # Store compiled constraints in metadata for filtering in generation strategies
         return {
-            **state, 
             "previous_answers": {**state.get("previous_answers", {}), "8.8": result},
             "metadata": {
                 **state.get("metadata", {}),
                 "compiled_constraints": result,
-            }
+            },
+            "current_step": "8.8",
         }
     
     workflow.add_node("functional_dependencies", functional_dependencies)

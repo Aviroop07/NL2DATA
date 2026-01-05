@@ -42,7 +42,7 @@ class IRGenerationState(TypedDict, total=False):
     attributes: Dict[str, List[Dict[str, Any]]]  # entity -> list of attributes
     primary_keys: Dict[str, List[str]]  # entity -> list of PK attribute names
     foreign_keys: List[Dict[str, Any]]  # List of foreign key definitions
-    constraints: Annotated[List[Dict[str, Any]], add]  # Accumulated constraints
+    constraints: List[Dict[str, Any]]  # Constraints (replace semantic, not additive - Phase 8 transforms them)
     # Derived attribute DSLs (Phase 2.9)
     # Flat maps keyed by "Entity.attribute" for deterministic gate checks.
     derived_formulas: Dict[str, Dict[str, Any]]
@@ -56,7 +56,7 @@ class IRGenerationState(TypedDict, total=False):
     junction_table_names: Dict[str, str]  # relation_key (sorted entity names) -> suggested table name
     
     # Phase 4: Functional Dependencies & Data Types
-    functional_dependencies: Annotated[List[Dict[str, Any]], add]  # Accumulated FDs
+    functional_dependencies: List[Dict[str, Any]]  # Functional dependencies (replace semantic, not additive)
     data_types: Dict[str, Dict[str, Dict[str, Any]]]  # entity -> attribute -> type info
     categorical_attributes: Dict[str, List[str]]  # entity -> list of categorical attrs
     

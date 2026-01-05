@@ -308,3 +308,138 @@ def check_state_consistency(state: Dict[str, Any], raise_on_error: bool = False)
     logger.debug("State validation passed")
     return True
 
+
+def validate_no_list_duplication(state: Dict[str, Any], raise_on_error: bool = False) -> List[str]:
+    """
+    Validate that additive list fields haven't been duplicated due to state reducer issues.
+    
+    This detects the common bug where nodes return **state with Annotated[..., add] fields,
+    causing exponential duplication (e.g., 16 items -> 32 -> 64 -> 128...).
+    
+    Checks:
+    - information_needs: Should not have duplicate descriptions
+    - constraints: Should not have duplicate constraint_ids or identical constraint structures
+    - functional_dependencies: Should not have duplicate FD structures
+    - sql_queries: Should not have duplicate query structures
+    
+    Args:
+        state: IRGenerationState dictionary
+        raise_on_error: If True, raise StateValidationError on severe duplication
+        
+    Returns:
+        List of validation issue messages (empty if no duplication detected)
+        
+    Raises:
+        StateValidationError: If raise_on_error=True and severe duplication is detected
+    """
+    issues = []
+    
+    # Check information_needs
+    information_needs = state.get("information_needs", [])
+    if information_needs:
+        descriptions = []
+        for need in information_needs:
+            if isinstance(need, dict):
+                desc = need.get("description", "")
+            else:
+                desc = getattr(need, "description", "")
+            if desc:
+                descriptions.append(desc)
+        
+        unique_descriptions = len(set(descriptions))
+        if len(information_needs) > unique_descriptions * 2:
+            issues.append(
+                f"State duplication detected in information_needs: {len(information_needs)} items "
+                f"but only {unique_descriptions} unique descriptions. "
+                f"Likely caused by returning **state with Annotated[..., add] reducer."
+            )
+    
+    # Check constraints
+    constraints = state.get("constraints", [])
+    if constraints:
+        # Try to identify duplicates by constraint_id or by structure
+        constraint_ids = []
+        constraint_signatures = []
+        
+        for constraint in constraints:
+            if isinstance(constraint, dict):
+                constraint_id = constraint.get("constraint_id") or constraint.get("id")
+                # Create a signature from key fields
+                sig = (
+                    constraint.get("constraint_type"),
+                    constraint.get("table"),
+                    constraint.get("column"),
+                    constraint.get("description", "")[:50] if constraint.get("description") else ""
+                )
+            else:
+                constraint_id = getattr(constraint, "constraint_id", None) or getattr(constraint, "id", None)
+                sig = (
+                    getattr(constraint, "constraint_type", None),
+                    getattr(constraint, "table", None),
+                    getattr(constraint, "column", None),
+                    (getattr(constraint, "description", "") or "")[:50]
+                )
+            
+            if constraint_id:
+                constraint_ids.append(constraint_id)
+            constraint_signatures.append(sig)
+        
+        # Check for duplicate IDs
+        if constraint_ids:
+            unique_ids = len(set(constraint_ids))
+            if len(constraints) > unique_ids * 2:
+                issues.append(
+                    f"State duplication detected in constraints: {len(constraints)} items "
+                    f"but only {unique_ids} unique constraint_ids. "
+                    f"Likely caused by returning **state with Annotated[..., add] reducer."
+                )
+        
+        # Check for duplicate signatures
+        unique_signatures = len(set(constraint_signatures))
+        if len(constraints) > unique_signatures * 2:
+            issues.append(
+                f"State duplication detected in constraints: {len(constraints)} items "
+                f"but only {unique_signatures} unique constraint structures. "
+                f"Likely caused by returning **state with Annotated[..., add] reducer."
+            )
+    
+    # Check functional_dependencies
+    functional_dependencies = state.get("functional_dependencies", [])
+    if functional_dependencies:
+        fd_signatures = []
+        for fd in functional_dependencies:
+            if isinstance(fd, dict):
+                sig = (
+                    tuple(sorted(fd.get("determinants", []))),
+                    tuple(sorted(fd.get("dependents", []))),
+                    fd.get("table", "")
+                )
+            else:
+                sig = (
+                    tuple(sorted(getattr(fd, "determinants", []))),
+                    tuple(sorted(getattr(fd, "dependents", []))),
+                    getattr(fd, "table", "")
+                )
+            fd_signatures.append(sig)
+        
+        unique_fds = len(set(fd_signatures))
+        if len(functional_dependencies) > unique_fds * 2:
+            issues.append(
+                f"State duplication detected in functional_dependencies: {len(functional_dependencies)} items "
+                f"but only {unique_fds} unique FD structures. "
+                f"Likely caused by returning **state with Annotated[..., add] reducer."
+            )
+    
+    # Log warnings for any issues found
+    if issues:
+        logger.warning(f"State duplication validation found {len(issues)} issues:")
+        for issue in issues:
+            logger.warning(f"  - {issue}")
+        
+        # Raise error if severe duplication detected
+        if raise_on_error:
+            raise StateValidationError(
+                f"State duplication validation failed: {issues[0]}"
+            )
+    
+    return issues

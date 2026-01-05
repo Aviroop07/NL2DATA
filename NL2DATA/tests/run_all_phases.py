@@ -155,6 +155,10 @@ async def main() -> None:
     pipeline_logger = get_pipeline_logger()
     pipeline_logger.initialize(output_dir=str(run_dir), filename="pipeline.log")
     
+    # Set environment variable for database path generation
+    import os
+    os.environ["NL2DATA_RUN_DIR"] = str(run_dir)
+    
     logger = get_logger(__name__)
     if max_phase == 9:
         logger.info("Starting complete workflow execution (Phases 1-9)")

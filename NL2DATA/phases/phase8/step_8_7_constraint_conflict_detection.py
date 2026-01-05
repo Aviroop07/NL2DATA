@@ -66,7 +66,7 @@ class ResolvedConstraint(BaseModel):
     
     model_config = ConfigDict(
         extra="allow",  # Allow extra fields for constraint-specific properties
-        schema_generator=OpenAICompatibleJsonSchema  # Use OpenAI-compatible schema generator
+        json_schema_extra={"schema_generator": OpenAICompatibleJsonSchema}
     )
 
 
@@ -100,7 +100,7 @@ class ConstraintConflictResolutionOutput(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
-        schema_generator=OpenAICompatibleJsonSchema  # Use OpenAI-compatible schema generator
+        json_schema_extra={"schema_generator": OpenAICompatibleJsonSchema}
     )
 
 

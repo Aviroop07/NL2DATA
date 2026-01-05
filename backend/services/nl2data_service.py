@@ -607,8 +607,9 @@ class NL2DataService:
                 
             elif checkpoint_type == "default_values":
                 # Execute default values (7.4)
-                # Note: This step moved from Phase 2 to Phase 7
-                from NL2DATA.phases.phase7.step_7_4_default_values import step_7_4_default_values_batch
+                # TODO: step_7_4_default_values_batch doesn't exist - this checkpoint may need to be removed or implemented
+                # from NL2DATA.phases.phase7.step_7_4_default_values import step_7_4_default_values_batch
+                raise NotImplementedError("Default values checkpoint is not yet implemented. step_7_4_default_values_batch function does not exist.")
                 
                 logger.info("Executing Step 7.4: Default Values...")
                 entities = state.get("entities", [])
@@ -659,10 +660,11 @@ class NL2DataService:
                 
             elif checkpoint_type == "check_constraints":
                 # Execute check constraints (7.5)
-                # Note: This step moved from Phase 2 to Phase 7
-                # Step 7.5 requires categorical attributes from Step 7.3, so we need to run 7.3 first
-                from NL2DATA.phases.phase7.step_7_3_categorical_detection import step_7_3_categorical_detection_batch
-                from NL2DATA.phases.phase7.step_7_5_check_constraint_detection import step_7_5_check_constraint_detection_batch
+                # TODO: step_7_3_categorical_detection_batch and step_7_5_check_constraint_detection_batch don't exist
+                # These functions may have been moved or removed. This checkpoint may need to be removed or use Phase 8 functions instead.
+                # from NL2DATA.phases.phase7.step_7_3_categorical_detection import step_7_3_categorical_detection_batch
+                # from NL2DATA.phases.phase7.step_7_5_check_constraint_detection import step_7_5_check_constraint_detection_batch
+                raise NotImplementedError("Check constraints checkpoint is not yet implemented. step_7_3_categorical_detection_batch and step_7_5_check_constraint_detection_batch functions do not exist.")
                 
                 logger.info("Executing Step 7.3: Categorical Detection (required for Step 7.5)...")
                 entities = state.get("entities", [])
@@ -1200,11 +1202,12 @@ class NL2DataService:
                 logger.info(f"Checkpoint 'functional_dependencies' reached. {len(all_fds)} functional dependencies identified.")
                 
             elif checkpoint_type == "constraints":
-                # Execute Phase 9: Categorical Identification and Constraints Detection
-                from NL2DATA.phases.phase9.step_9_0_categorical_column_identification import step_9_0_categorical_column_identification_batch
-                from NL2DATA.phases.phase9.step_9_1_constraint_detection import step_9_1_constraint_detection_with_loop
-                from NL2DATA.phases.phase9.step_9_2_constraint_scope_analysis import step_9_2_constraint_scope_analysis_batch
-                from NL2DATA.phases.phase9.step_9_3_constraint_enforcement_strategy import step_9_3_constraint_enforcement_strategy_batch
+                # Execute Phase 8: Categorical Identification and Constraints Detection
+                # Note: These functions are actually in Phase 8, not Phase 9
+                from NL2DATA.phases.phase8.step_8_2_categorical_column_identification import step_8_2_categorical_column_identification_batch
+                from NL2DATA.phases.phase8.step_8_4_constraint_detection import step_8_4_constraint_detection_with_loop
+                from NL2DATA.phases.phase8.step_8_5_constraint_scope_analysis import step_8_5_constraint_scope_analysis_batch
+                from NL2DATA.phases.phase8.step_8_6_constraint_enforcement_strategy import step_8_6_constraint_enforcement_strategy_batch
                 
                 logger.info("Executing Phase 9: Categorical Identification and Constraints Detection...")
                 
@@ -1213,9 +1216,9 @@ class NL2DataService:
                 data_types = state.get("data_types", {})
                 relational_schema = state.get("relational_schema", {})
                 
-                # Step 9.0: Categorical Column Identification
-                logger.info("Executing Step 9.0: Categorical Column Identification...")
-                result_9_0 = await step_9_0_categorical_column_identification_batch(
+                # Step 8.2: Categorical Column Identification
+                logger.info("Executing Step 8.2: Categorical Column Identification...")
+                result_8_2 = await step_8_2_categorical_column_identification_batch(
                     entities=entities,
                     entity_attributes=attributes,
                     entity_attribute_types=data_types,
@@ -1226,19 +1229,25 @@ class NL2DataService:
                 
                 # Extract categorical attributes from result
                 categorical_attributes = {}
-                entity_results_9_0 = result_9_0.get("entity_results", {})
-                for entity_name, cat_result in entity_results_9_0.items():
-                    categorical_attributes[entity_name] = cat_result.get("categorical_attributes", [])
+                if hasattr(result_8_2, "entity_results"):
+                    entity_results_8_2 = result_8_2.entity_results
+                else:
+                    entity_results_8_2 = result_8_2.get("entity_results", {})
+                for entity_name, cat_result in entity_results_8_2.items():
+                    if hasattr(cat_result, "categorical_attributes"):
+                        categorical_attributes[entity_name] = cat_result.categorical_attributes
+                    else:
+                        categorical_attributes[entity_name] = cat_result.get("categorical_attributes", [])
                 
                 state["previous_answers"] = state.get("previous_answers", {})
-                state["previous_answers"]["9.0"] = result_9_0
+                state["previous_answers"]["8.2"] = result_8_2
                 state["categorical_attributes"] = categorical_attributes
                 
-                logger.info(f"Step 9.0 completed: Identified categorical attributes for {len(categorical_attributes)} entities")
+                logger.info(f"Step 8.2 completed: Identified categorical attributes for {len(categorical_attributes)} entities")
                 
-                # Step 9.1: Constraint Detection (with loop)
-                logger.info("Executing Step 9.1: Constraint Detection...")
-                result_9_1 = await step_9_1_constraint_detection_with_loop(
+                # Step 8.4: Constraint Detection (with loop)
+                logger.info("Executing Step 8.4: Constraint Detection...")
+                result_8_4 = await step_8_4_constraint_detection_with_loop(
                     nl_description=nl_description,
                     normalized_schema=relational_schema
                 )
@@ -1246,47 +1255,47 @@ class NL2DataService:
                 # Extract constraints from result (flatten all categories)
                 constraints = []
                 for category in ["statistical_constraints", "structural_constraints", "distribution_constraints", "other_constraints"]:
-                    category_constraints = result_9_1.get(category, [])
+                    category_constraints = result_8_4.get(category, [])
                     for constraint in category_constraints:
                         constraint["constraint_category"] = category
                         constraints.append(constraint)
                 
-                # Step 9.2: Constraint Scope Analysis
-                logger.info("Executing Step 9.2: Constraint Scope Analysis...")
-                result_9_2 = await step_9_2_constraint_scope_analysis_batch(
+                # Step 8.5: Constraint Scope Analysis
+                logger.info("Executing Step 8.5: Constraint Scope Analysis...")
+                result_8_5 = await step_8_5_constraint_scope_analysis_batch(
                     constraints=constraints,
                     normalized_schema=relational_schema
                 )
                 constraints_with_scope = []
-                for constraint, scope_result in zip(constraints, result_9_2):
+                for constraint, scope_result in zip(constraints, result_8_5):
                     merged = {**constraint, **scope_result}
                     constraints_with_scope.append(merged)
                 
-                # Step 9.3: Constraint Enforcement Strategy
-                logger.info("Executing Step 9.3: Constraint Enforcement Strategy...")
-                result_9_3 = await step_9_3_constraint_enforcement_strategy_batch(
+                # Step 8.6: Constraint Enforcement Strategy
+                logger.info("Executing Step 8.6: Constraint Enforcement Strategy...")
+                result_8_6 = await step_8_6_constraint_enforcement_strategy_batch(
                     constraints_with_scope=constraints_with_scope,
                     normalized_schema=relational_schema
                 )
                 
-                state["constraints"] = result_9_3  # Constraints with enforcement strategies
-                state["current_step"] = "9.3"
+                state["constraints"] = result_8_6  # Constraints with enforcement strategies
+                state["current_step"] = "8.6"
                 state["previous_answers"] = state.get("previous_answers", {})
-                state["previous_answers"]["9.1"] = result_9_1
-                state["previous_answers"]["9.2"] = result_9_2
-                state["previous_answers"]["9.3"] = result_9_3
+                state["previous_answers"]["8.4"] = result_8_4
+                state["previous_answers"]["8.5"] = result_8_5
+                state["previous_answers"]["8.6"] = result_8_6
                 
                 # Set checkpoint status
                 job_manager.update_job(job_id, status="checkpoint_constraints", state=state)
-                logger.info(f"Checkpoint 'constraints' reached. {len(result_9_3)} constraints identified.")
+                logger.info(f"Checkpoint 'constraints' reached. {len(result_8_6)} constraints identified.")
                 
             elif checkpoint_type == "generation_strategies":
-                # Execute Phase 9: Generation Strategies (steps 9.6-9.11, after constraints)
+                # Execute Phase 9: Generation Strategies (steps 9.1-9.6, after constraints)
                 # Note: This should run the Phase 9 graph from numerical_ranges to distribution_compilation
                 # For now, we'll use the graph directly
                 from NL2DATA.orchestration.graphs.phase9 import create_phase_9_graph
                 
-                logger.info("Executing Phase 9: Generation Strategies (steps 9.6-9.11)...")
+                logger.info("Executing Phase 9: Generation Strategies (steps 9.1-9.6)...")
                 
                 # Ensure constraints checkpoint was reached first
                 if not state.get("constraints"):
@@ -1298,12 +1307,13 @@ class NL2DataService:
                 
                 # Run the graph - it will execute from constraint_compilation through distribution_compilation
                 # But we need to start from numerical_ranges, so we'll manually execute the steps
-                from NL2DATA.phases.phase9.step_9_6_numerical_range_definition import step_9_6_numerical_range_definition_batch
-                from NL2DATA.phases.phase9.step_9_7_text_generation_strategy import step_9_7_text_generation_strategy_batch
-                from NL2DATA.phases.phase9.step_9_8_boolean_dependency_analysis import step_9_8_boolean_dependency_analysis_batch
-                from NL2DATA.phases.phase9.step_9_9_data_volume_specifications import step_9_9_data_volume_specifications
-                from NL2DATA.phases.phase9.step_9_10_partitioning_strategy import step_9_10_partitioning_strategy_batch
-                from NL2DATA.phases.phase9.step_9_11_distribution_compilation import step_9_11_distribution_compilation
+                # Note: Step numbers are 9.1-9.6, not 9.6-9.11
+                from NL2DATA.phases.phase9.step_9_1_numerical_range_definition import step_9_1_numerical_range_definition_batch
+                from NL2DATA.phases.phase9.step_9_2_text_generation_strategy import step_9_2_text_generation_strategy_batch
+                from NL2DATA.phases.phase9.step_9_3_boolean_dependency_analysis import step_9_3_boolean_dependency_analysis_batch
+                from NL2DATA.phases.phase9.step_9_4_data_volume_specifications import step_9_4_data_volume_specifications
+                from NL2DATA.phases.phase9.step_9_5_partitioning_strategy import step_9_5_partitioning_strategy_batch
+                from NL2DATA.phases.phase9.step_9_6_distribution_compilation import step_9_6_distribution_compilation
                 
                 relational_schema = state.get("relational_schema", {})
                 data_types = state.get("data_types", {})
@@ -1354,66 +1364,66 @@ class NL2DataService:
                         elif sql_type_upper in ("BOOLEAN", "BOOL"):
                             boolean_attributes.append(attr_meta)
                 
-                # Step 9.6: Numerical Range Definition
+                # Step 9.1: Numerical Range Definition
                 numerical_strategies = {}
                 if numerical_attributes:
-                    logger.info("Executing Step 9.6: Numerical Range Definition...")
-                    result_9_6 = await step_9_6_numerical_range_definition_batch(
+                    logger.info("Executing Step 9.1: Numerical Range Definition...")
+                    result_9_1 = await step_9_1_numerical_range_definition_batch(
                         numerical_attributes=numerical_attributes,
                         constraints_map=None
                     )
-                    numerical_strategies = result_9_6
+                    numerical_strategies = result_9_1
                     state["previous_answers"] = state.get("previous_answers", {})
-                    state["previous_answers"]["9.6"] = result_9_6
+                    state["previous_answers"]["9.1"] = result_9_1
                 
-                # Step 9.7: Text Generation Strategy
+                # Step 9.2: Text Generation Strategy
                 text_strategies = {}
                 if text_attributes:
-                    logger.info("Executing Step 9.7: Text Generation Strategy...")
-                    result_9_7 = await step_9_7_text_generation_strategy_batch(
+                    logger.info("Executing Step 9.2: Text Generation Strategy...")
+                    result_9_2 = await step_9_2_text_generation_strategy_batch(
                         text_attributes=text_attributes,
                         generator_catalog=None
                     )
-                    text_strategies = result_9_7
-                    state["previous_answers"]["9.7"] = result_9_7
+                    text_strategies = result_9_2
+                    state["previous_answers"]["9.2"] = result_9_2
                 
-                # Step 9.8: Boolean Dependency Analysis
+                # Step 9.3: Boolean Dependency Analysis
                 boolean_strategies = {}
                 if boolean_attributes:
-                    logger.info("Executing Step 9.8: Boolean Dependency Analysis...")
-                    result_9_8 = await step_9_8_boolean_dependency_analysis_batch(
+                    logger.info("Executing Step 9.3: Boolean Dependency Analysis...")
+                    result_9_3 = await step_9_3_boolean_dependency_analysis_batch(
                         boolean_attributes=boolean_attributes,
                         related_attributes_map=None,
                         dsl_grammar=None
                     )
-                    boolean_strategies = result_9_8
-                    state["previous_answers"]["9.8"] = result_9_8
+                    boolean_strategies = result_9_3
+                    state["previous_answers"]["9.3"] = result_9_3
                 
-                # Step 9.9: Data Volume Specifications
-                logger.info("Executing Step 9.9: Data Volume Specifications...")
-                result_9_9 = await step_9_9_data_volume_specifications(
+                # Step 9.4: Data Volume Specifications
+                logger.info("Executing Step 9.4: Data Volume Specifications...")
+                result_9_4 = await step_9_4_data_volume_specifications(
                     entities=entities,
                     nl_description=nl_description
                 )
-                entity_volumes = result_9_9.get("entity_volumes", {})
-                state["previous_answers"]["9.9"] = result_9_9
+                entity_volumes = result_9_4.get("entity_volumes", {})
+                state["previous_answers"]["9.4"] = result_9_4
                 
-                # Step 9.10: Partitioning Strategy
+                # Step 9.5: Partitioning Strategy
                 partitioning_strategies = {}
                 if entity_volumes:
-                    logger.info("Executing Step 9.10: Partitioning Strategy...")
-                    result_9_10 = await step_9_10_partitioning_strategy_batch(
+                    logger.info("Executing Step 9.5: Partitioning Strategy...")
+                    result_9_5 = await step_9_5_partitioning_strategy_batch(
                         entities=entities,
                         entity_volumes=entity_volumes,
                         relational_schema=relational_schema,
                         nl_description=nl_description
                     )
-                    partitioning_strategies = result_9_10.get("partitioning_strategies", {})
-                    state["previous_answers"]["9.10"] = result_9_10
+                    partitioning_strategies = result_9_5.get("partitioning_strategies", {})
+                    state["previous_answers"]["9.5"] = result_9_5
                 
-                # Step 9.11: Distribution Compilation
-                logger.info("Executing Step 9.11: Distribution Compilation...")
-                result_9_11 = step_9_11_distribution_compilation(
+                # Step 9.6: Distribution Compilation
+                logger.info("Executing Step 9.6: Distribution Compilation...")
+                result_9_6 = await step_9_6_distribution_compilation(
                     numerical_strategies=numerical_strategies,
                     text_strategies=text_strategies,
                     boolean_strategies=boolean_strategies,
@@ -1424,7 +1434,7 @@ class NL2DataService:
                 
                 # Convert column_gen_specs to generation_strategies format
                 generation_strategies = {}
-                column_gen_specs = result_9_11.get("column_gen_specs", [])
+                column_gen_specs = result_9_6.get("column_gen_specs", [])
                 for spec in column_gen_specs:
                     table = spec.get("table", "")
                     column = spec.get("column", "")
@@ -1438,8 +1448,8 @@ class NL2DataService:
                 state["text_strategies"] = text_strategies
                 state["boolean_strategies"] = boolean_strategies
                 state["partitioning_strategies"] = partitioning_strategies
-                state["current_step"] = "9.11"
-                state["previous_answers"]["9.11"] = result_9_11
+                state["current_step"] = "9.6"
+                state["previous_answers"]["9.6"] = result_9_6
                 
                 # Set checkpoint status
                 job_manager.update_job(job_id, status="checkpoint_generation_strategies", state=state)

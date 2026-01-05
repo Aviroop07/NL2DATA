@@ -1,6 +1,7 @@
 """Phase 6: DDL Generation & Schema Creation Graph.
 
-This phase handles DDL compilation, validation, error correction, schema creation, and SQL query generation.
+This phase handles DDL compilation, validation, and schema creation.
+All steps are deterministic - no LLM interaction required.
 """
 
 from typing import Dict, Any
@@ -64,78 +65,41 @@ def _wrap_step_6_2(step_func):
 def _wrap_step_6_3(step_func):
     """Wrap Step 6.3 to work as LangGraph node."""
     async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 6.3: DDL Error Correction")
+        logger.info("[LangGraph] Executing Step 6.3: Schema Creation")
         prev_answers = state.get("previous_answers", {})
         metadata = state.get("metadata", {})
         ddl_statements = metadata.get("ddl_statements", [])
         
-        validation_result = prev_answers.get("6.2", {})
-        result = await invoke_step_checked(
-            step_func,
-            validation_errors=validation_result if isinstance(validation_result, dict) else {},
-            original_ddl=ddl_statements,
-            normalized_schema=metadata.get("relational_schema", {}),
-        )
-        
-        # Handle both Pydantic model and dict formats
-        if hasattr(result, "corrected_ddl"):
-            corrected_ddl = result.corrected_ddl
-        elif isinstance(result, dict):
-            corrected_ddl = result.get("corrected_ddl", ddl_statements)
-        else:
-            corrected_ddl = ddl_statements
-        
-        return {
-            "current_step": "6.3",
-            "previous_answers": {**prev_answers, "6.3": result},
-            "metadata": {**metadata, "ddl_statements": corrected_ddl},
-        }
-    return node
-
-
-def _wrap_step_6_4(step_func):
-    """Wrap Step 6.4 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 6.4: Schema Creation")
-        prev_answers = state.get("previous_answers", {})
-        metadata = state.get("metadata", {})
-        ddl_statements = metadata.get("ddl_statements", [])
+        # Generate database path if not already set
+        database_path = metadata.get("database_path")
+        if not database_path:
+            # Generate a database path in the run directory if available
+            import os
+            from pathlib import Path
+            run_dir = os.environ.get("NL2DATA_RUN_DIR")
+            if run_dir:
+                database_path = str(Path(run_dir) / "schema.db")
+                # Ensure directory exists
+                Path(run_dir).mkdir(parents=True, exist_ok=True)
+            else:
+                # Fallback: use a temp file
+                import tempfile
+                temp_dir = tempfile.gettempdir()
+                database_path = str(Path(temp_dir) / "nl2data_schema.db")
         
         result = await invoke_step_checked(
             step_func,
             ddl_statements=ddl_statements,
+            database_path=database_path,
         )
         
-        return {
-            "current_step": "6.4",
-            "previous_answers": {**prev_answers, "6.4": result},
-        }
-    return node
-
-
-def _wrap_step_6_5(step_func):
-    """Wrap Step 6.5 to work as LangGraph node."""
-    async def node(state: IRGenerationState) -> Dict[str, Any]:
-        logger.info("[LangGraph] Executing Step 6.5: SQL Query Generation")
-        prev_answers = state.get("previous_answers", {})
-        information_needs = state.get("information_needs", [])
-        metadata = state.get("metadata", {})
-        relational_schema = metadata.get("relational_schema", {})
-        
-        # Process each information need
-        results = []
-        for info_need in information_needs:
-            result = await invoke_step_checked(
-                step_func,
-                information_need=info_need,
-                normalized_schema=relational_schema,
-                data_types=state.get("data_types", {}),
-            )
-            results.append(result)
+        # Store database path in metadata for later access
+        updated_metadata = {**metadata, "database_path": database_path}
         
         return {
-            "current_step": "6.5",
-            "previous_answers": {**prev_answers, "6.5": results},
+            "current_step": "6.3",
+            "previous_answers": {**prev_answers, "6.3": result},
+            "metadata": updated_metadata,
         }
     return node
 
@@ -145,24 +109,18 @@ def create_phase_6_graph() -> StateGraph:
     from NL2DATA.phases.phase6 import (
         step_6_1_ddl_compilation,
         step_6_2_ddl_validation,
-        step_6_3_ddl_error_correction,
-        step_6_4_schema_creation,
-        step_6_5_sql_query_generation,
+        step_6_3_schema_creation,
     )
     
     workflow = StateGraph(IRGenerationState)
     workflow.add_node("ddl_compilation", _wrap_step_6_1(step_6_1_ddl_compilation))
     workflow.add_node("ddl_validation", _wrap_step_6_2(step_6_2_ddl_validation))
-    workflow.add_node("ddl_error_correction", _wrap_step_6_3(step_6_3_ddl_error_correction))
-    workflow.add_node("schema_creation", _wrap_step_6_4(step_6_4_schema_creation))
-    workflow.add_node("sql_generation", _wrap_step_6_5(step_6_5_sql_query_generation))
+    workflow.add_node("schema_creation", _wrap_step_6_3(step_6_3_schema_creation))
     
     workflow.set_entry_point("ddl_compilation")
     workflow.add_edge("ddl_compilation", "ddl_validation")
-    workflow.add_edge("ddl_validation", "ddl_error_correction")
-    workflow.add_edge("ddl_error_correction", "schema_creation")
-    workflow.add_edge("schema_creation", "sql_generation")
-    workflow.add_edge("sql_generation", END)
+    workflow.add_edge("ddl_validation", "schema_creation")
+    workflow.add_edge("schema_creation", END)
     
     checkpointer = MemorySaver()
     return workflow.compile(checkpointer=checkpointer)

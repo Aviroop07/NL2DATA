@@ -45,7 +45,7 @@ def step_6_2_ddl_validation(
     the statements in a local SQLite database to catch errors. No LLM call needed.
     
     Args:
-        ddl_statements: List of CREATE TABLE statements from Step 10.1
+        ddl_statements: List of CREATE TABLE statements from Step 6.1
         validate_with_db: Whether to validate by executing in SQLite (default: True)
         
     Returns:

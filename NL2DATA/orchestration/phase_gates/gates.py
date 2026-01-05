@@ -234,7 +234,7 @@ def check_phase_6_gate(state: Dict[str, Any]) -> GateResult:
         warnings.append("No DDL statements found in metadata")
     
     # Check schema creation result if present
-    schema_creation_result = previous_answers.get("6.4", {})
+    schema_creation_result = previous_answers.get("6.3", {})
     schema_created = False
     if schema_creation_result:
         # Handle both Pydantic model and dict formats

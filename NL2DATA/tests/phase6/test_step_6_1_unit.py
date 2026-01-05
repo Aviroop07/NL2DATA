@@ -90,7 +90,13 @@ async def test_step_6_1_basic():
     
     # Validate DDL statements
     ddl_validation = {"valid": True, "errors": []}
-    ddl_statements = result.get("ddl_statements", [])
+    # Handle both Pydantic model and dict formats
+    if hasattr(result, "ddl_statements"):
+        ddl_statements = result.ddl_statements
+    elif isinstance(result, dict):
+        ddl_statements = result.get("ddl_statements", [])
+    else:
+        ddl_statements = []
     if not ddl_statements or len(ddl_statements) == 0:
         ddl_validation["valid"] = False
         ddl_validation["errors"].append("ddl_statements must be a non-empty list")
@@ -134,8 +140,8 @@ async def test_step_6_1_with_data_types():
             {
                 "name": "Customer",
                 "columns": [
-                    {"name": "customer_id", "type": "INTEGER", "nullable": False},
-                    {"name": "name", "type": "VARCHAR(255)", "nullable": False}
+                    {"name": "customer_id", "nullable": False},  # Remove type, let data_types provide it
+                    {"name": "name", "nullable": False}  # Remove type, let data_types provide it
                 ],
                 "primary_key": ["customer_id"]
             }
@@ -143,8 +149,8 @@ async def test_step_6_1_with_data_types():
     }
     data_types = {
         "Customer": {
-            "customer_id": {"sql_type": "INTEGER", "precision": None, "scale": None},
-            "name": {"sql_type": "VARCHAR", "precision": 255, "scale": None}
+            "customer_id": {"type": "INTEGER", "precision": None, "scale": None},
+            "name": {"type": "VARCHAR", "size": 255, "precision": None, "scale": None}
         }
     }
     input_data = {
@@ -167,7 +173,14 @@ async def test_step_6_1_with_data_types():
     )
     validations.append(struct_validation)
     
-    ddl_statements = result.get("ddl_statements", [])
+    # Handle both Pydantic model and dict formats
+    if hasattr(result, "ddl_statements"):
+        ddl_statements = result.ddl_statements
+    elif isinstance(result, dict):
+        ddl_statements = result.get("ddl_statements", [])
+    else:
+        ddl_statements = []
+    
     if ddl_statements:
         # Check that the DDL includes the correct types
         ddl_str = ddl_statements[0].upper()

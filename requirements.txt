@@ -1,6 +1,11 @@
 # Core dependencies
 openai>=1.0.0
 
+# Web framework and server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+
 # LangChain stack (pinned for compatibility)
 langchain==0.3.27
 langchain-core==0.3.81
@@ -11,11 +16,25 @@ langgraph==1.0.1
 langgraph-prebuilt==1.0.1
 langgraph-sdk==0.2.15
 
-langsmith>=0.1.0    # For observability and tracing
+# Data validation and configuration
 pydantic>=2.0.0
+pydantic-settings>=2.0.0
 pyyaml>=6.0.0
 python-dotenv>=1.0.0
+
+# HTTP client
+httpx>=0.27.0
+
+# Diagram generation
+graphviz>=0.20.0
+
+# Observability and tracing
+langsmith>=0.1.0
 
 # Optional (recommended): deterministic semantic similarity for Phase 2 Step 2.3
 sentence-transformers>=2.6.0
 lark>=1.1.9
+
+# Testing (optional, for development)
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

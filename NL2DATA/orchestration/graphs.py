@@ -10,7 +10,7 @@ from .graphs.phase2 import create_phase_2_graph
 from .graphs.phase3 import create_phase_3_graph
 from .graphs.phase4 import create_phase_4_graph
 from .graphs.phase5 import create_phase_5_graph
-from .graphs.phase10 import create_phase_6_graph  # Phase 6: DDL Generation (old Phase 10)
+from .graphs.phase6 import create_phase_6_graph  # Phase 6: DDL Generation & Schema Creation
 from .graphs.phase6 import create_phase_7_graph  # Phase 7: Information Mining (old Phase 6)
 from .graphs.phase7 import create_phase_8_graph  # Phase 8: Functional Dependencies (old Phase 7)
 from .graphs.master import (

@@ -1,132 +1,103 @@
-"""Unit tests for Step 6.3: DDL Error Correction."""
+"""Unit tests for Step 6.3: Schema Creation.
+
+This is a deterministic step that executes DDL statements to create database schema.
+"""
 
 import sys
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from NL2DATA.phases.phase6.step_6_3_ddl_error_correction import (
-    step_6_3_ddl_error_correction,
-    DDLErrorCorrectionOutput,
-    Patch,
-    DDLCorrection
+from NL2DATA.phases.phase6.step_6_3_schema_creation import (
+    step_6_3_schema_creation,
+    SchemaCreationOutput
 )
 from NL2DATA.tests.utils.test_helpers import (
-    LLMMockHelper,
     ValidationHelper,
     TestResultDisplay
 )
 
 
 async def test_step_6_3_basic():
-    """Test Step 6.3 with basic input."""
-    TestResultDisplay.print_test_header("DDL Error Correction", "6.3")
-    TestResultDisplay.print_test_case(1, "Basic DDL error correction")
+    """Test Step 6.3 with valid DDL statements."""
+    TestResultDisplay.print_test_header("Schema Creation", "6.3")
+    TestResultDisplay.print_test_case(1, "Basic schema creation with valid DDL")
     
-    validation_errors = {
-        "validation_passed": False,
-        "syntax_errors": [
-            {
-                "error": "Syntax error: missing closing parenthesis and comma",
-                "statement": "CREATE TABLE Transaction (transaction_id BIGINT PRIMARY KEY, card_id BIGINT NOT NULL, merchant_id BIGINT NOT NULL"
-            },
-            {
-                "error": "Type mismatch: DECIMAL precision/scale syntax error",
-                "statement": "fraud_risk_score DECIMAL(5,2) NULL"
-            }
-        ],
-        "naming_conflicts": []
-    }
-    original_ddl = [
-        "CREATE TABLE Transaction (transaction_id BIGINT PRIMARY KEY, card_id BIGINT NOT NULL, merchant_id BIGINT NOT NULL",
-        "transaction_datetime TIMESTAMP NOT NULL, amount_usd DECIMAL(12,2) NOT NULL, exchange_rate DECIMAL(8,4) NULL, fraud_risk_score DECIMAL(5,2) NULL"
+    ddl_statements = [
+        "CREATE TABLE \"Transaction\" (\n"
+        "    \"transaction_id\" BIGINT NOT NULL,\n"
+        "    \"card_id\" BIGINT NOT NULL,\n"
+        "    \"merchant_id\" BIGINT NOT NULL,\n"
+        "    \"transaction_datetime\" TIMESTAMP NOT NULL,\n"
+        "    \"amount_usd\" DECIMAL(12,2) NOT NULL,\n"
+        "    \"exchange_rate\" DECIMAL(8,4) NULL,\n"
+        "    \"fraud_risk_score\" DECIMAL(5,2) NULL,\n"
+        "    PRIMARY KEY (\"transaction_id\")\n"
+        ");",
+        "CREATE TABLE \"Card\" (\n"
+        "    \"card_id\" BIGINT NOT NULL,\n"
+        "    \"card_type\" VARCHAR(50) NULL,\n"
+        "    PRIMARY KEY (\"card_id\")\n"
+        ");",
+        "CREATE TABLE \"Merchant\" (\n"
+        "    \"merchant_id\" BIGINT NOT NULL,\n"
+        "    \"merchant_name\" VARCHAR(255) NULL,\n"
+        "    PRIMARY KEY (\"merchant_id\")\n"
+        ");"
     ]
-    normalized_schema = {
-        "normalized_tables": [
-            {
-                "name": "Transaction",
-                "columns": [
-                    {"name": "transaction_id", "type": "BIGINT", "nullable": False},
-                    {"name": "card_id", "type": "BIGINT", "nullable": False},
-                    {"name": "merchant_id", "type": "BIGINT", "nullable": False},
-                    {"name": "transaction_datetime", "type": "TIMESTAMP", "nullable": False},
-                    {"name": "amount_usd", "type": "DECIMAL(12,2)", "nullable": False},
-                    {"name": "exchange_rate", "type": "DECIMAL(8,4)", "nullable": True},
-                    {"name": "fraud_risk_score", "type": "DECIMAL(5,2)", "nullable": True}
-                ],
-                "primary_key": ["transaction_id"],
-                "foreign_keys": [
-                    {"from_attributes": ["card_id"], "to_entity": "Card", "to_attributes": ["card_id"]},
-                    {"from_attributes": ["merchant_id"], "to_entity": "Merchant", "to_attributes": ["merchant_id"]}
-                ]
-            }
-        ]
-    }
     input_data = {
-        "validation_errors": validation_errors,
-        "original_ddl": original_ddl,
-        "normalized_schema": normalized_schema
+        "ddl_statements": ddl_statements
     }
     TestResultDisplay.print_input_summary(input_data)
     
-    mock_response = DDLErrorCorrectionOutput(
-        ir_patches=[
-            Patch(
-                operation="fix_syntax",
-                target="Transaction.card_id",
-                changes={"add_comma": True, "add_closing_paren": True},
-                reasoning="Missing comma after merchant_id and closing parenthesis"
-            ),
-            Patch(
-                operation="fix_type",
-                target="Transaction.fraud_risk_score",
-                changes={"fix_decimal_syntax": True},
-                reasoning="DECIMAL type syntax is correct, but statement needs proper closing"
-            )
-        ],
-        corrections=[
-            DDLCorrection(
-                original="CREATE TABLE Transaction (transaction_id BIGINT PRIMARY KEY, card_id BIGINT NOT NULL, merchant_id BIGINT NOT NULL",
-                corrected="CREATE TABLE Transaction (transaction_id BIGINT PRIMARY KEY, card_id BIGINT NOT NULL, merchant_id BIGINT NOT NULL,",
-                reasoning="Added missing comma after merchant_id"
-            ),
-            DDLCorrection(
-                original="transaction_datetime TIMESTAMP NOT NULL, amount_usd DECIMAL(12,2) NOT NULL, exchange_rate DECIMAL(8,4) NULL, fraud_risk_score DECIMAL(5,2) NULL",
-                corrected="transaction_datetime TIMESTAMP NOT NULL, amount_usd DECIMAL(12,2) NOT NULL, exchange_rate DECIMAL(8,4) NULL, fraud_risk_score DECIMAL(5,2) NULL);",
-                reasoning="Added missing closing parenthesis and semicolon"
-            )
-        ],
-        reasoning="Fixed syntax errors: added missing comma and closing parenthesis with semicolon"
+    # This is a deterministic step, no LLM mocking needed
+    # Use in-memory database (database_path=None)
+    result = step_6_3_schema_creation(
+        ddl_statements=ddl_statements,
+        database_path=None  # In-memory for testing
     )
-    
-    with LLMMockHelper.patch_standardized_llm_call(mock_response):
-        with LLMMockHelper.patch_model_router("6.3"):
-            result = await step_6_3_ddl_error_correction(
-                validation_errors=validation_errors,
-                original_ddl=original_ddl,
-                normalized_schema=normalized_schema
-            )
     
     TestResultDisplay.print_output_summary(result)
     
     validations = []
     struct_validation = ValidationHelper.validate_output_structure(
         result,
-        ["ir_patches", "corrections", "reasoning"]
+        ["success", "errors", "tables_created"]
     )
     validations.append(struct_validation)
     
     type_validation = ValidationHelper.validate_types(
         result,
         {
-            "ir_patches": list,
-            "corrections": list,
-            "reasoning": str
+            "success": bool,
+            "errors": list,
+            "tables_created": list
         }
     )
     validations.append(type_validation)
+    
+    # Validate that schema creation succeeded
+    success_validation = {"valid": True, "errors": []}
+    if not result.success:
+        success_validation["valid"] = False
+        success_validation["errors"].append("Schema creation should succeed for valid DDL")
+    if len(result.errors) > 0:
+        success_validation["valid"] = False
+        success_validation["errors"].append(f"Should have no errors, got {result.errors}")
+    validations.append(success_validation)
+    
+    # Validate that tables were created
+    tables_validation = {"valid": True, "errors": []}
+    tables_created = result.tables_created
+    expected_tables = ["Transaction", "Card", "Merchant"]
+    for expected_table in expected_tables:
+        # Check if table name appears in any created table (case-insensitive)
+        found = any(expected_table.lower() in table.lower() for table in tables_created)
+        if not found:
+            tables_validation["valid"] = False
+            tables_validation["errors"].append(f"Expected table '{expected_table}' to be created")
+    validations.append(tables_validation)
     
     all_valid = all(v.get("valid", False) for v in validations)
     for validation in validations:
@@ -136,10 +107,122 @@ async def test_step_6_3_basic():
     return all_valid
 
 
+async def test_step_6_3_with_errors():
+    """Test Step 6.3 with invalid DDL statements."""
+    TestResultDisplay.print_test_header("Schema Creation", "6.3")
+    TestResultDisplay.print_test_case(2, "Schema creation with invalid DDL")
+    
+    ddl_statements = [
+        "CREATE TABLE \"Transaction\" (\n"
+        "    \"transaction_id\" BIGINT NOT NULL,\n"
+        "    \"card_id\" BIGINT NOT NULL\n"  # Missing comma and closing
+        ";",  # Invalid syntax
+        "CREATE TABLE \"Card\" (\n"
+        "    \"card_id\" BIGINT NOT NULL,\n"
+        "    PRIMARY KEY (\"card_id\")\n"
+        ");"
+    ]
+    input_data = {
+        "ddl_statements": ddl_statements
+    }
+    TestResultDisplay.print_input_summary(input_data)
+    
+    result = step_6_3_schema_creation(
+        ddl_statements=ddl_statements,
+        database_path=None  # In-memory for testing
+    )
+    
+    TestResultDisplay.print_output_summary(result)
+    
+    validations = []
+    struct_validation = ValidationHelper.validate_output_structure(
+        result,
+        ["success", "errors", "tables_created"]
+    )
+    validations.append(struct_validation)
+    
+    # Validate that schema creation failed for invalid DDL
+    error_validation = {"valid": True, "errors": []}
+    errors = result.errors
+    if len(errors) == 0:
+        error_validation["valid"] = False
+        error_validation["errors"].append("Should have errors for invalid DDL statements")
+    validations.append(error_validation)
+    
+    all_valid = all(v.get("valid", False) for v in validations)
+    for validation in validations:
+        TestResultDisplay.print_validation_results(validation)
+    
+    TestResultDisplay.print_test_summary(all_valid, "6.3")
+    return all_valid
+
+
+async def test_step_6_3_with_file_database():
+    """Test Step 6.3 with file-based database."""
+    TestResultDisplay.print_test_header("Schema Creation", "6.3")
+    TestResultDisplay.print_test_case(3, "Schema creation with file-based database")
+    
+    import tempfile
+    import os
+    from pathlib import Path
+    
+    ddl_statements = [
+        "CREATE TABLE \"Customer\" (\n"
+        "    \"customer_id\" INTEGER NOT NULL,\n"
+        "    \"name\" VARCHAR(255) NOT NULL,\n"
+        "    PRIMARY KEY (\"customer_id\")\n"
+        ");"
+    ]
+    
+    # Create temporary database file
+    temp_dir = tempfile.mkdtemp()
+    database_path = str(Path(temp_dir) / "test_schema.db")
+    
+    result = step_6_3_schema_creation(
+        ddl_statements=ddl_statements,
+        database_path=database_path
+    )
+    
+    # Verify database file was created
+    file_exists = os.path.exists(database_path)
+    
+    # Verify database can be opened and table exists
+    import sqlite3
+    table_exists = False
+    if file_exists:
+        try:
+            conn = sqlite3.connect(database_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Customer';")
+            table_exists = cursor.fetchone() is not None
+            conn.close()
+        except Exception as e:
+            print(f"Error checking database: {e}")
+    
+    # Cleanup
+    try:
+        if os.path.exists(database_path):
+            os.remove(database_path)
+        os.rmdir(temp_dir)
+    except:
+        pass
+    
+    success = result.success and file_exists and table_exists
+    
+    if success:
+        print("\n[PASS] File-based database creation works correctly")
+    else:
+        print(f"\n[FAIL] File-based database creation failed: success={result.success}, file_exists={file_exists}, table_exists={table_exists}")
+    
+    return success
+
+
 async def main():
     """Run all tests for Step 6.3."""
     results = []
     results.append(await test_step_6_3_basic())
+    results.append(await test_step_6_3_with_errors())
+    results.append(await test_step_6_3_with_file_database())
     
     print("\n" + "=" * 80)
     if all(results):

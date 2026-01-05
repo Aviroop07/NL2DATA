@@ -1,4 +1,4 @@
-"""Phase 6, Step 6.4: Schema Creation.
+"""Phase 6, Step 6.3: Schema Creation.
 
 Execute DDL statements to create actual database schema in a local database.
 Deterministic execution - executes validated DDL statements in SQLite.
@@ -22,32 +22,32 @@ class SchemaCreationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def step_6_4_schema_creation(
-    ddl_statements: List[str],  # Validated DDL statements from Step 6.2 or corrected from Step 6.3
+def step_6_3_schema_creation(
+    ddl_statements: List[str],  # Validated DDL statements from Step 6.2
     database_path: Optional[str] = None,  # Path to database file (None = in-memory)
 ) -> SchemaCreationOutput:
     """
-    Step 6.4 (deterministic): Execute DDL statements to create database schema.
+    Step 6.3 (deterministic): Execute DDL statements to create database schema.
     
     This is a deterministic execution that creates the actual database schema
     by executing DDL statements in a local SQLite database.
     
     Args:
-        ddl_statements: List of validated CREATE TABLE statements
+        ddl_statements: List of validated CREATE TABLE statements from Step 6.2
         database_path: Optional path to database file (None = in-memory for testing)
         
     Returns:
-        dict: Schema creation result with success, errors, tables_created
+        SchemaCreationOutput: Schema creation result with success, errors, tables_created
         
     Example:
         >>> ddl = ["CREATE TABLE Customer (customer_id INTEGER PRIMARY KEY);"]
-        >>> result = step_6_4_schema_creation(ddl)
-        >>> result["success"]
+        >>> result = step_6_3_schema_creation(ddl)
+        >>> result.success
         True
-        >>> "Customer" in result["tables_created"]
+        >>> "Customer" in result.tables_created
         True
     """
-    logger.info("Starting Step 6.4: Schema Creation (deterministic)")
+    logger.info("Starting Step 6.3: Schema Creation (deterministic)")
     
     errors = []
     tables_created = []
@@ -108,4 +108,3 @@ def step_6_4_schema_creation(
             errors=[error_msg],
             tables_created=tables_created
         )
-

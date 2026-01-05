@@ -10,7 +10,7 @@ from .phase2 import create_phase_2_graph
 from .phase3 import create_phase_3_graph  # Phase 3: ER Design
 from .phase4 import create_phase_4_graph  # Phase 4: Relational Schema
 from .phase5 import create_phase_5_graph  # Phase 5: Data Type Assignment
-from .phase10 import create_phase_6_graph  # Phase 6: DDL Generation & Schema Creation (old Phase 10)
+from .phase6 import create_phase_6_graph  # Phase 6: DDL Generation & Schema Creation
 from .phase7 import create_phase_7_graph  # Phase 7: Information Mining (old Phase 6)
 from .phase8 import create_phase_8_graph  # Phase 8: Functional Dependencies (old Phase 7)
 from .phase9 import create_phase_9_graph  # Phase 9: Generation Strategies

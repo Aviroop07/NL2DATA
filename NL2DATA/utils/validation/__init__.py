@@ -6,6 +6,7 @@ from .state_validation import (
     validate_no_duplicate_entities,
     validate_no_duplicate_attributes,
     check_state_consistency,
+    validate_no_list_duplication,
     StateValidationError,
 )
 
@@ -26,6 +27,7 @@ __all__ = [
     "validate_no_duplicate_entities",
     "validate_no_duplicate_attributes",
     "check_state_consistency",
+    "validate_no_list_duplication",
     "StateValidationError",
     "validate_entity_names",
     "validate_attribute_names",

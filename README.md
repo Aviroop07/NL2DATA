@@ -270,27 +270,24 @@ Each phase is implemented as a LangGraph StateGraph, allowing for:
 
 ### Phase 6: DDL Generation & Schema Creation
 
-**Purpose**: Generate production-ready DDL statements, validate them, and optionally create the database schema.
+**Purpose**: Generate production-ready DDL statements from table objects, validate them, and execute them on a local database.
 
 **Steps**:
-1. **DDL Compilation (6.1)**: Generate CREATE TABLE statements from relational schema and data types
-2. **DDL Validation (6.2)**: Validate DDL syntax and semantics
-3. **DDL Error Correction (6.3)**: Fix validation errors (iterative loop until no errors)
-4. **Schema Creation (6.4)**: Optional: Create schema in actual database
-5. **SQL Query Generation (6.5)**: Generate SQL queries for information needs (if any)
+1. **DDL Compilation (6.1)**: Generate CREATE TABLE statements from relational schema and data types (deterministic)
+2. **DDL Validation (6.2)**: Validate DDL syntax and semantics using SQLite (deterministic)
+3. **Schema Creation (6.3)**: Execute DDL statements to create database schema in a local SQLite database (deterministic)
 
 **Output**:
 - Complete DDL statements
 - Validated SQL schema
-- SQL query templates
-- Database schema (if created)
+- Database schema file (SQLite database)
 
 **Key Logic**:
-- Template-based DDL generation
-- Multi-pass validation with syntax and semantic checks
-- Automatic error correction with iterative refinement
-- Optional database schema creation
-- Query generation from information needs
+- Deterministic DDL generation from normalized schema
+- SQLite-based validation for syntax and semantic checks
+- Automatic database schema creation in local SQLite database
+- Database file created in run directory (or temp directory if run directory not available)
+- All steps are deterministic - no LLM interaction required
 
 ### Phase 7: Information Mining
 
